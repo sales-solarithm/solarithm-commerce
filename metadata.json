@@ -1,0 +1,6 @@
+{
+  "name": "Solarithm OS",
+  "description": "Enterprise solar operating system and admin console for project management, proposals, clients, billing, and commissions.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

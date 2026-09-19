@@ -1,0 +1,16 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: var(--font-inter);
+  
+  --color-solarithm-gold: #D4AF37;
+  --color-solarithm-gold-light: #FDF6E3;
+  --color-solarithm-brown: #4A3728;
+  --color-solarithm-brown-light: #8B6B4A;
+  --color-solarithm-dark: #1A1A1A;
+  --color-solarithm-darker: #121212;
+  --color-solarithm-card: #1E1E1E;
+}

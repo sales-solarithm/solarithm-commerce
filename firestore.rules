@@ -1,0 +1,83 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Helper function to check user role
+    function hasRole(roles) {
+      return request.auth != null && 
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in roles;
+    }
+    
+    // Users collection - only admins/owners can write
+    match /users/{userId} {
+      allow read: if request.auth != null;
+      allow write: if hasRole(['admin', 'owner']);
+    }
+
+    // Employees collection - master directory
+    match /employees/{employeeId} {
+      allow read: if request.auth != null;
+      allow write: if hasRole(['admin', 'owner']);
+    }
+
+    // Approvals queue for password reset and authentication exceptions
+    match /approvals/{approvalId} {
+      allow read: if request.auth != null;
+      allow create: if request.resource.data.type == 'PASSWORD_RESET_REQUEST';
+      allow update, delete: if hasRole(['admin', 'owner']);
+    }
+
+    // Registered apps registry
+    match /registeredApps/{appId} {
+      allow read: if request.auth != null;
+      allow write: if hasRole(['admin', 'owner']);
+    }
+
+    // Audit logs for ecosystem telemetry
+    match /auditLogs/{logId} {
+      allow read: if hasRole(['admin', 'owner']);
+      allow create: if request.auth != null;
+    }
+
+    // Proposals collection
+    match /proposals/{proposalId} {
+      allow read: if request.auth != null;
+      allow write: if hasRole(['admin', 'owner']);
+    }
+    
+    // Projects collection
+    match /projects/{projectId} {
+      allow read, write: if request.time != null;
+    }
+    
+    // Clients collection
+    match /clients/{clientId} {
+      allow read, write: if request.time != null;
+    }
+
+    match /designers/{designerId} {
+      allow read: if request.time != null;
+      allow write: if hasRole(['admin', 'owner']);
+    }
+
+    match /scopes/{scopeId} {
+      allow read: if request.time != null;
+      allow write: if hasRole(['admin', 'owner']);
+    }
+
+    match /pricingRules/{ruleId} {
+      allow read: if request.time != null;
+      allow write: if hasRole(['admin', 'owner']);
+    }
+    
+    // Change Requests collection
+    match /changeRequests/{requestId} {
+      allow read, write: if request.auth != null;
+    }
+    
+    // Default rule for other collections
+    match /{document=**} {
+      allow read, write: if request.auth != null && hasRole(['admin', 'owner']);
+    }
+  }
+}
