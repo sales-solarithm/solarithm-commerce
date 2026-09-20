@@ -1838,6 +1838,7 @@ function NewProjectTab({ lockedEmail, setActiveTab, currentUser }: { lockedEmail
           lockedEmail={lockedEmail}
           designers={designers}
           scopesData={scopesData}
+          initialTargetScope={selectedScope}
           onClose={() => setIsUpgradeModalOpen(false)}
           onSuccess={(msg) => {
             setToastMsg(msg);
