@@ -119,7 +119,8 @@ export const PROJECT_FIELDS = {
   CAPACITY_UNIT: 'capacityUnit', LOCATION: 'location', DESIGNER_EMAIL: 'designerEmail',
   PRICING_CATEGORY: 'pricingCategory', STATUS: 'status', CREATED_AT: 'createdAt', UPDATED_AT: 'updatedAt',
   MODULES: 'modules',
-  ASSIGNED_SCOPES: 'assignedScopes'
+  ASSIGNED_SCOPES: 'assignedScopes',
+  DATE: 'date'
 } as const;
 
 export interface ProjectRecord {
@@ -127,6 +128,8 @@ export interface ProjectRecord {
   projectName: string;
   projectNumber: string;
   srNumber?: string;
+  date?: string;
+  projectDate?: string;
   clientId: string;
   clientName: string;
   scopeOfWork: string;

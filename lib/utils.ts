@@ -5,6 +5,14 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
+export function getTodayDateString(): string {
+  const d = new Date();
+  const year = d.getFullYear();
+  const month = (d.getMonth() + 1).toString().padStart(2, '0');
+  const day = d.getDate().toString().padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
 export function generateClientInitials(companyName: string) {
   if (!companyName) return "";
   const words = companyName.trim().split(/\s+/);
@@ -131,3 +139,114 @@ export function parsePackageScopes(selectedScopeName: string, scopeObj?: any): S
     label: selectedScopeName.trim()
   }];
 }
+
+export interface DesignerPerson {
+  id: string;
+  name: string;
+  email: string;
+  department: string;
+  designation: string;
+  role: string;
+  employeeId: string;
+}
+
+export function filterAndDeduplicateDesigners(empDocs: any[], userDocs: any[] = []): DesignerPerson[] {
+  const allDocs = [...(empDocs || []), ...(userDocs || [])];
+
+  const normalizeName = (name: string) => (name || "").toLowerCase().replace(/[^a-z]/g, "");
+
+  const rawList = allDocs.map(doc => {
+    const d = typeof doc?.data === "function" ? doc.data() : (doc || {});
+    const docId = doc?.id || d?.id || "";
+    return {
+      id: docId,
+      name: d.name || d.displayName || d.employeeName || d.email || "Unnamed Employee",
+      email: (d.email || "").trim().toLowerCase(),
+      personalEmail: (d.personalEmail || d.personalEmailAddress || "").trim().toLowerCase(),
+      department: (d.department || "").trim(),
+      designation: (d.designation || "").trim(),
+      role: (d.role || d.assignedRole || "").trim(),
+      employeeId: (d.employeeId || "").trim().toUpperCase()
+    };
+  }).filter(u => Boolean(u.email));
+
+  // 1. Relax Designer Query / Filtering Logic:
+  // Populate the dropdown with any user where:
+  // - department.toLowerCase() === 'design' OR includes 'design'
+  // - role.toLowerCase().includes('design')
+  // - designation.toLowerCase().includes('design')
+  const designCandidates = rawList.filter(u => {
+    const dept = u.department.toLowerCase();
+    const role = u.role.toLowerCase();
+    const desig = u.designation.toLowerCase();
+    return (
+      dept === "design" ||
+      dept.includes("design") ||
+      role.includes("design") ||
+      desig.includes("design")
+    );
+  });
+
+  // 2. Deduplicate User Records:
+  // Match by official workspace email (@solarithmdesign.com) and deduplicate by employee ID or normalized name so each team member appears exactly once.
+  const deduplicated: Array<any> = [];
+
+  for (const candidate of designCandidates) {
+    const candNormName = normalizeName(candidate.name);
+    const candEmpId = candidate.employeeId;
+    const candEmail = candidate.email;
+    const candPersonal = candidate.personalEmail;
+
+    const existingIndex = deduplicated.findIndex(item => {
+      if (candEmpId && item.employeeId && candEmpId === item.employeeId) return true;
+      if (candEmail && (item.email === candEmail || item.personalEmail === candEmail)) return true;
+      if (candPersonal && (item.email === candPersonal || item.personalEmail === candPersonal)) return true;
+      if (candNormName && item.normName && candNormName === item.normName) return true;
+      return false;
+    });
+
+    const isWorkspace = candEmail.includes("@solarithmdesign.com");
+
+    if (existingIndex === -1) {
+      deduplicated.push({
+        ...candidate,
+        normName: candNormName,
+        isWorkspace
+      });
+    } else {
+      const existing = deduplicated[existingIndex];
+      const existingIsWorkspace = existing.email.includes("@solarithmdesign.com");
+      if (!existingIsWorkspace && isWorkspace) {
+        deduplicated[existingIndex] = {
+          ...candidate,
+          normName: candNormName || existing.normName,
+          isWorkspace: true
+        };
+      } else if (isWorkspace && !existing.employeeId && candidate.employeeId) {
+        deduplicated[existingIndex] = {
+          ...existing,
+          ...candidate,
+          normName: candNormName || existing.normName,
+          isWorkspace: true
+        };
+      }
+    }
+  }
+
+  // Fallback if no specific design candidates found
+  const finalPool = deduplicated.length > 0 ? deduplicated : rawList;
+
+  // Sort by name for clean presentation
+  finalPool.sort((a, b) => a.name.localeCompare(b.name));
+
+  return finalPool.map(d => ({
+    id: d.id,
+    name: d.name,
+    email: d.email,
+    department: d.department,
+    designation: d.designation,
+    role: d.role,
+    employeeId: d.employeeId
+  }));
+}
+

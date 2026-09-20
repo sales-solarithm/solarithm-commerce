@@ -42,15 +42,6 @@ export default function UpgradeProjectModal({
   scopesData,
   onSuccess
 }: UpgradeProjectModalProps) {
-  // Candidate standard scopes
-  const STANDARD_SCOPES = useMemo(() => [
-    "Pre-Design",
-    "CEIG",
-    "IFP",
-    "PVsyst",
-    "Detailed Engineering"
-  ], []);
-
   // Format scope key back to a user-friendly label
   const getScopeLabel = useCallback((keyOrName: string): string => {
     const lower = keyOrName.toLowerCase();
@@ -110,17 +101,17 @@ export default function UpgradeProjectModal({
     return new Set(historicalScopes.map(s => s.key));
   }, [historicalScopes]);
 
-  // Available new scopes that can be appended
+  // Available new scopes that can be appended strictly from Firestore
   const availableCandidateScopes = useMemo(() => {
-    const dbScopeNames = scopesData.map(s => s.name).filter(Boolean);
-    const combined = Array.from(new Set([...STANDARD_SCOPES, ...dbScopeNames]));
+    const dbScopeNames = scopesData.map(s => s.name || s.packageName).filter(Boolean) as string[];
+    const combined = Array.from(new Set(dbScopeNames)).sort((a, b) => a.localeCompare(b));
     
     // Filter out scopes that are already assigned historically
     return combined.filter(scopeName => {
       const key = toScopeKey(scopeName);
       return !historicalScopeKeys.has(key);
     });
-  }, [STANDARD_SCOPES, scopesData, historicalScopeKeys]);
+  }, [scopesData, historicalScopeKeys]);
 
   // State for newly added scopes to append: Array of { key, label, designerEmail }
   const [newlySelectedScopes, setNewlySelectedScopes] = useState<
@@ -484,7 +475,7 @@ export default function UpgradeProjectModal({
               </div>
             ) : (
               <div className="p-3 rounded-lg bg-[#202020] border border-[#333333] text-xs text-amber-400/90 text-center font-medium">
-                All standard scopes (Pre-Design, CEIG, IFP, PVsyst, Detailed Engineering) are already assigned to this project.
+                All available scopes from the registry are already assigned to this project.
               </div>
             )}
 

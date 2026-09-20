@@ -1,20 +1,20 @@
 "use client";
 
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useSyncExternalStore } from "react";
 import { onAuthStateChanged, signOut } from "firebase/auth";
 import { auth, db } from "@/lib/firebase";
-import { collection, onSnapshot, query, where, addDoc, serverTimestamp, getDocs, orderBy, limit, doc, getDoc, writeBatch, updateDoc } from "firebase/firestore";
+import { collection, onSnapshot, query, where, addDoc, serverTimestamp, Timestamp, getDocs, orderBy, limit, doc, getDoc, writeBatch, updateDoc } from "firebase/firestore";
 import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
 import confetti from "canvas-confetti";
 import { format } from "date-fns";
-import { Loader2, LogOut, FileText, UserPlus, FolderOpen, ArrowLeft, Building2, CheckCircle2, Clock, AlertCircle, XCircle, X, Briefcase, Menu, BarChart3, CheckSquare, Clock3, RefreshCw, Users, Layers, Sparkles, Lock } from "lucide-react";
+import { Loader2, LogOut, FileText, UserPlus, FolderOpen, ArrowLeft, Building2, CheckCircle2, Clock, AlertCircle, XCircle, X, Briefcase, Menu, BarChart3, CheckSquare, Clock3, RefreshCw, Users, Layers, Sparkles, Lock, Calendar } from "lucide-react";
 import { COLLECTIONS, CLIENT_STATUS, PROJECT_STATUS, CLIENT_FIELDS, PROJECT_FIELDS, APPROVAL_TYPES, APPROVAL_STATUS } from "@/src/config/schema";
 import ThemeToggle from "@/components/ThemeToggle";
 import AppLauncherDropdown from "@/components/AppLauncherDropdown";
 import UpgradeProjectModal from "@/components/UpgradeProjectModal";
-import { generateClientInitials, toTitleCase, getStatusColor, toScopeKey, parsePackageScopes, type ScopeItem } from "@/lib/utils";
+import { generateClientInitials, toTitleCase, getStatusColor, toScopeKey, parsePackageScopes, getTodayDateString, filterAndDeduplicateDesigners, type ScopeItem } from "@/lib/utils";
 
 // --- SCHEMAS ---
 
@@ -42,6 +42,7 @@ type ClientFormData = z.infer<typeof clientSchema>;
 const projectSchema = z.object({
   projectName: z.string().min(1, "Project Name is required"),
   clientId: z.string().min(1, "Client is required"),
+  date: z.string().min(1, "Project Date is required"),
   scopeOfWork: z.string().min(1, "Scope of Work is required"),
   subService: z.string().optional().nullable(),
   plantCapacity: z.number().nullable().optional(),
@@ -50,6 +51,8 @@ const projectSchema = z.object({
   designerId: z.string().optional().nullable(),
   remarks: z.string().optional().nullable(),
 });
+
+type ProjectFormData = z.infer<typeof projectSchema>;
 
 // --- CONSTANTS ---
 const INDIAN_STATES = [
@@ -60,64 +63,60 @@ const INDIAN_STATES = [
   "Tripura", "Uttar Pradesh", "Uttarakhand", "West Bengal"
 ];
 
+const emptySubscribe = () => () => {};
+
+const SESSION_STORAGE_KEY = "solarithm_commerce_session";
+let sessionListeners: Array<() => void> = [];
+
+const subscribeSession = (listener: () => void) => {
+  sessionListeners.push(listener);
+  return () => {
+    sessionListeners = sessionListeners.filter(l => l !== listener);
+  };
+};
+
+const notifySessionChanged = () => {
+  sessionListeners.forEach(l => {
+    try {
+      l();
+    } catch {
+      // Ignore
+    }
+  });
+};
+
+function getSessionSnapshot(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return sessionStorage.getItem(SESSION_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function getServerSessionSnapshot(): string | null {
+  return null;
+}
+
 // --- MAIN COMPONENT ---
 export default function ProjectEntryTool() {
-  // Restore existing active session from sessionStorage if available
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
-    if (typeof window === "undefined") return false;
-    try {
-      const stored = sessionStorage.getItem("solarithm_commerce_session");
-      if (stored) {
-        const session = JSON.parse(stored);
-        return Boolean(session?.authenticated);
-      }
-    } catch {
-      // Ignore storage read errors
-    }
-    return false;
-  });
+  const hasMounted = useSyncExternalStore(emptySubscribe, () => true, () => false);
+  const sessionRaw = useSyncExternalStore(subscribeSession, getSessionSnapshot, getServerSessionSnapshot);
 
-  const [userEmail, setUserEmail] = useState<string | null>(() => {
-    if (typeof window === "undefined") return null;
+  const activeSession = useMemo(() => {
+    if (!sessionRaw) return null;
     try {
-      const stored = sessionStorage.getItem("solarithm_commerce_session");
-      if (stored) {
-        const session = JSON.parse(stored);
-        return session?.email || null;
-      }
+      const parsed = JSON.parse(sessionRaw);
+      return parsed?.authenticated ? parsed : null;
     } catch {
-      // Ignore
+      return null;
     }
-    return null;
-  });
+  }, [sessionRaw]);
 
-  const [userRole, setUserRole] = useState<string | null>(() => {
-    if (typeof window === "undefined") return null;
-    try {
-      const stored = sessionStorage.getItem("solarithm_commerce_session");
-      if (stored) {
-        const session = JSON.parse(stored);
-        return session?.role || null;
-      }
-    } catch {
-      // Ignore
-    }
-    return null;
-  });
-
-  const [userName, setUserName] = useState<string | null>(() => {
-    if (typeof window === "undefined") return null;
-    try {
-      const stored = sessionStorage.getItem("solarithm_commerce_session");
-      if (stored) {
-        const session = JSON.parse(stored);
-        return session?.name || null;
-      }
-    } catch {
-      // Ignore
-    }
-    return null;
-  });
+  const isAuthenticated = Boolean(activeSession?.authenticated);
+  const userEmail = activeSession?.email || null;
+  const userRole = activeSession?.role || null;
+  const userName = activeSession?.name || null;
 
   const [tempEmail, setTempEmail] = useState("");
   const [isVerifyingEmail, setIsVerifyingEmail] = useState(false);
@@ -140,16 +139,13 @@ export default function ProjectEntryTool() {
     const resetTimer = () => {
       clearTimeout(timeoutId);
       timeoutId = setTimeout(() => {
-        setIsAuthenticated(false);
-        setUserEmail(null);
-        setUserRole(null);
-        setUserName(null);
         setErrorMessage("Session expired due to inactivity. Please log in again.");
         try {
-          sessionStorage.removeItem("solarithm_commerce_session");
+          sessionStorage.removeItem(SESSION_STORAGE_KEY);
         } catch {
           // Ignore
         }
+        notifySessionChanged();
       }, 300000);
     };
 
@@ -170,18 +166,15 @@ export default function ProjectEntryTool() {
   }, [isAuthenticated]);
 
   const handleLogout = () => {
-    setIsAuthenticated(false);
-    setUserEmail(null);
-    setUserRole(null);
-    setUserName(null);
     setTempEmail("");
     setErrorMessage("");
     setDeniedAppDiagnostics(null);
     try {
-      sessionStorage.removeItem("solarithm_commerce_session");
+      sessionStorage.removeItem(SESSION_STORAGE_KEY);
     } catch {
       // Ignore
     }
+    notifySessionChanged();
   };
 
   // Cross-checks against potential naming formats (slugs, display names, snake_case variants)
@@ -226,13 +219,9 @@ export default function ProjectEntryTool() {
     // Super Admin Bypass
     const SUPER_ADMIN_EMAILS = ["jayjalpa2002@gmail.com", "jay.solarithm@gmail.com"];
     if (SUPER_ADMIN_EMAILS.includes(normalizedEmail)) {
-      setIsAuthenticated(true);
-      setUserEmail(normalizedEmail);
-      setUserRole("owner");
-      setUserName(normalizedEmail);
       setIsVerifyingEmail(false);
       try {
-        sessionStorage.setItem("solarithm_commerce_session", JSON.stringify({
+        sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({
           authenticated: true,
           email: normalizedEmail,
           role: "owner",
@@ -242,6 +231,7 @@ export default function ProjectEntryTool() {
       } catch {
         // Ignore
       }
+      notifySessionChanged();
       return;
     }
 
@@ -380,15 +370,11 @@ export default function ProjectEntryTool() {
         const derivedRole = isAdminRole ? (roleStr.includes("owner") ? "owner" : "admin") : (isSalesDept ? "sales" : (userDoc.role || userDoc.assignedRole || "sales"));
         const displayName = userDoc.name || normalizedEmail;
 
-        setIsAuthenticated(true);
-        setUserEmail(normalizedEmail);
-        setUserRole(derivedRole);
-        setUserName(displayName);
         setErrorMessage("");
         setDeniedAppDiagnostics(null);
 
         try {
-          sessionStorage.setItem("solarithm_commerce_session", JSON.stringify({
+          sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({
             authenticated: true,
             email: normalizedEmail,
             role: derivedRole,
@@ -398,6 +384,7 @@ export default function ProjectEntryTool() {
         } catch {
           // Ignore
         }
+        notifySessionChanged();
       } else {
         // 3. Error Handling & Diagnostics:
         // Print retrieved list of assigned app identifiers directly to browser console
@@ -445,6 +432,11 @@ export default function ProjectEntryTool() {
       setIsVerifyingEmail(false);
     }
   };
+
+  // Mount guard to prevent SSR and client initial hydration mismatch
+  if (!hasMounted) {
+    return null;
+  }
 
   // Lock Screen (Dark Charcoal #121212 & Metallic Gold #D4AF37)
   if (!isAuthenticated) {
@@ -1000,11 +992,13 @@ function NewProjectTab({ lockedEmail, setActiveTab, currentUser }: { lockedEmail
   const [designers, setDesigners] = useState<any[]>([]);
   const [pricingRules, setPricingRules] = useState<any[]>([]);
   const [scopesData, setScopesData] = useState<any[]>([]);
+  const [existingProjects, setExistingProjects] = useState<any[]>([]);
   
-  const { register, handleSubmit, formState: { errors }, reset, setValue, control } = useForm({
+  const { register, handleSubmit, formState: { errors }, reset, setValue, control } = useForm<ProjectFormData>({
     resolver: zodResolver(projectSchema),
     defaultValues: {
-      capacityUnit: 'KW'
+      capacityUnit: 'KW',
+      date: getTodayDateString()
     }
   });
 
@@ -1017,28 +1011,17 @@ function NewProjectTab({ lockedEmail, setActiveTab, currentUser }: { lockedEmail
   const enteredLocation = useWatch({ control, name: "location" }) || "";
 
   // Search-First Deduplication Gate States
-  const [matchedExistingProject, setMatchedExistingProject] = useState<any | null>(null);
-  const [isDedupChecking, setIsDedupChecking] = useState(false);
   const [isUpgradeModalOpen, setIsUpgradeModalOpen] = useState(false);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 
-  const DEFAULT_SCOPES = useMemo(() => [
-    "Pre-Design",
-    "CEIG",
-    "IFP",
-    "PVsyst",
-    "Detailed Engineering",
-    "Pre-Design + CEIG",
-    "Pre-Design + PVsyst",
-    "Pre-Design + CEIG + IFP",
-    "Pre-Design + CEIG + IFP + PVsyst",
-    "Pre-Design + CEIG + IFP + PVsyst + Detailed Engineering"
-  ], []);
-
+  // Supported Scopes strictly from Firestore - no hardcoded fallback lists or dummy combinations
   const uniqueScopes = useMemo(() => {
-    const dbScopes = scopesData.map(s => s.name).filter(Boolean);
-    return Array.from(new Set([...DEFAULT_SCOPES, ...dbScopes]));
-  }, [scopesData, DEFAULT_SCOPES]);
+    const dbScopes = scopesData
+      .map(s => (s.name || s.packageName || "").trim())
+      .filter(Boolean);
+    const unique = Array.from(new Set(dbScopes));
+    return unique.sort((a, b) => a.localeCompare(b));
+  }, [scopesData]);
 
   const selectedScopeDoc = useMemo(() => {
     return scopesData.find(s => s.name === selectedScope);
@@ -1148,38 +1131,29 @@ function NewProjectTab({ lockedEmail, setActiveTab, currentUser }: { lockedEmail
       setClients([]);
     });
     
-    // Fetch roster strictly from employees collection using Master Blueprint schema
+    // Fetch active designers from both employees and users collections
+    let cachedEmpDocs: any[] = [];
+    let cachedUserDocs: any[] = [];
+
+    const syncDesigners = () => {
+      const activeDesigners = filterAndDeduplicateDesigners(cachedEmpDocs, cachedUserDocs);
+      setDesigners(activeDesigners);
+    };
+
     const eq = query(collection(db, COLLECTIONS.EMPLOYEES));
     const unsubD = onSnapshot(eq, (snapshot) => {
-      if (!snapshot.empty) {
-        const list = snapshot.docs.map(doc => {
-          const data = doc.data();
-          return {
-            id: doc.id,
-            name: data.name || data.email || "Unnamed Employee",
-            email: data.email || "",
-            department: data.department || "",
-            designation: data.designation || "",
-            role: data.role || "",
-            employeeId: data.employeeId || ""
-          };
-        }).filter(emp => Boolean(emp.email));
-
-        // Prioritize Design/Engineering staff if specified, otherwise include full employee roster
-        const designStaff = list.filter(emp => {
-          const dept = emp.department.toLowerCase();
-          const role = emp.role.toLowerCase();
-          const desig = emp.designation.toLowerCase();
-          return dept.includes('design') || dept.includes('eng') || role.includes('designer') || role.includes('engineer') || desig.includes('design') || desig.includes('engineer');
-        });
-
-        setDesigners(designStaff.length > 0 ? designStaff : list);
-      } else {
-        setDesigners([]);
-      }
+      cachedEmpDocs = snapshot.docs;
+      syncDesigners();
     }, (err) => {
       console.error("Error fetching employees roster in NewProjectTab:", err);
-      setDesigners([]);
+    });
+
+    const uq = query(collection(db, COLLECTIONS.USERS));
+    const unsubU = onSnapshot(uq, (snapshot) => {
+      cachedUserDocs = snapshot.docs;
+      syncDesigners();
+    }, (err) => {
+      console.error("Error fetching users roster in NewProjectTab:", err);
     });
 
     const pq = query(collection(db, "pricingRules"));
@@ -1190,96 +1164,145 @@ function NewProjectTab({ lockedEmail, setActiveTab, currentUser }: { lockedEmail
       setPricingRules([]);
     });
 
+    let cachedScopes: any[] = [];
+    let cachedPackages: any[] = [];
+
+    const syncScopesData = () => {
+      const combined = [...cachedScopes, ...cachedPackages];
+      const seen = new Set<string>();
+      const list: any[] = [];
+      for (const item of combined) {
+        const name = (item.name || item.packageName || item.title || "").trim();
+        if (name && !seen.has(name.toLowerCase())) {
+          seen.add(name.toLowerCase());
+          list.push({ ...item, name });
+        }
+      }
+      setScopesData(list);
+    };
+
     const sq = query(collection(db, "scopes"));
     const unsubS = onSnapshot(sq, (snapshot) => {
-      setScopesData(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+      cachedScopes = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      syncScopesData();
     }, (err) => {
       console.error("Error fetching scopes in NewProjectTab:", err);
-      setScopesData([]);
+    });
+
+    const pkQ = query(collection(db, "packages"));
+    const unsubPk = onSnapshot(pkQ, (snapshot) => {
+      cachedPackages = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      syncScopesData();
+    }, (err) => {
+      console.error("Error fetching packages in NewProjectTab:", err);
+    });
+
+    const prjQ = query(collection(db, COLLECTIONS.PROJECTS));
+    const unsubPrj = onSnapshot(prjQ, (snapshot) => {
+      setExistingProjects(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+    }, (err) => {
+      console.error("Error fetching projects for deduplication in NewProjectTab:", err);
+      setExistingProjects([]);
     });
 
     return () => {
       unsub();
       unsubD();
+      unsubU();
       unsubP();
       unsubS();
+      unsubPk();
+      unsubPrj();
     };
   }, [lockedEmail, currentUser]);
 
-  // Search-First Deduplication Gate: Real-time debounced query against existing central projects
-  useEffect(() => {
-    const trimmedName = String(enteredProjectName || "").trim();
-    const trimmedLoc = String(enteredLocation || "").trim();
+  // Stricter Composite Match Condition:
+  // A project should ONLY be identified as an existing project / duplicate candidate if ALL four core attributes match simultaneously:
+  // 1. Client ID / Client Name EXACT MATCH (normalized)
+  // 2. Project Name EXACT MATCH (case-insensitive, trimmed: p.projectName.trim().toLowerCase() === newProjectName.trim().toLowerCase())
+  // 3. Plant Capacity EXACT MATCH (numerical value comparison: Number(p.capacity) === Number(newCapacity))
+  // 4. Location / Site Address EXACT MATCH (normalized text match)
+  const matchedExistingProject = useMemo(() => {
+    const trimmedNewName = String(enteredProjectName || "").trim().toLowerCase();
+    const normalizeAddress = (s: any) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    const trimmedNewLoc = normalizeAddress(enteredLocation);
 
-    const timer = setTimeout(async () => {
-      if (trimmedName.length < 3 && trimmedLoc.length < 4) {
-        setMatchedExistingProject(null);
-        setIsDedupChecking(false);
-        return;
-      }
+    // If any core attribute is missing, it cannot be considered an existing duplicate
+    if (!selectedClientId || !trimmedNewName || !trimmedNewLoc) {
+      return null;
+    }
 
-      setIsDedupChecking(true);
+    const selectedClient = clients.find(c => c.id === selectedClientId);
+    const selectedClientNameNorm = normalizeAddress(selectedClient?.name);
 
-      try {
-        const pRef = collection(db, COLLECTIONS.PROJECTS);
-        const snap = await getDocs(pRef);
+    const newCapNum = (capacityValue !== null && capacityValue !== undefined && !isNaN(Number(capacityValue)) && String(capacityValue).trim() !== "")
+      ? Number(capacityValue)
+      : null;
 
-        if (snap.empty) {
-          setMatchedExistingProject(null);
-          setIsDedupChecking(false);
-          return;
-        }
+    const match = existingProjects.find((p: any) => {
+      // 1. Client ID / Client Name EXACT MATCH (normalized)
+      const pClientId = p.clientId || "";
+      const pClientNameNorm = normalizeAddress(p.clientName);
+      const clientMatches = Boolean(
+        (selectedClientId && pClientId === selectedClientId) ||
+        (selectedClientNameNorm && pClientNameNorm && selectedClientNameNorm === pClientNameNorm)
+      );
+      if (!clientMatches) return false;
 
-        const allProjects = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      // 2. Project Name EXACT MATCH (case-insensitive, trimmed)
+      const pName = String(p.projectName || "").trim().toLowerCase();
+      if (pName !== trimmedNewName) return false;
 
-        const cleanStr = (s: any) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-        const cleanNameInput = cleanStr(trimmedName);
-        const cleanLocInput = cleanStr(trimmedLoc);
+      // 3. Plant Capacity EXACT MATCH (numerical value comparison)
+      const pCapRaw = p.plantCapacity ?? p.capacity;
+      const pCapNum = (pCapRaw !== null && pCapRaw !== undefined && !isNaN(Number(pCapRaw)) && String(pCapRaw).trim() !== "")
+        ? Number(pCapRaw)
+        : null;
 
-        const match = allProjects.find((p: any) => {
-          const pNameClean = cleanStr(p.projectName);
-          const pLocClean = cleanStr(p.location);
+      const capacityMatches = (newCapNum !== null && pCapNum !== null)
+        ? newCapNum === pCapNum
+        : (newCapNum === null && pCapNum === null);
+      if (!capacityMatches) return false;
 
-          // 1. Exact or highly probable match on Project Name (min 3 clean characters)
-          if (cleanNameInput.length >= 3) {
-            if (pNameClean === cleanNameInput) return true;
-            if (pNameClean.length >= 5 && cleanNameInput.length >= 5) {
-              if (pNameClean.includes(cleanNameInput) || cleanNameInput.includes(pNameClean)) {
-                return true;
-              }
-            }
-          }
+      // 4. Location / Site Address EXACT MATCH (normalized text match)
+      const pLocNorm = normalizeAddress(p.location);
+      if (!pLocNorm || pLocNorm !== trimmedNewLoc) return false;
 
-          // 2. Exact or highly probable match on Client Site Address / Location
-          if (cleanLocInput.length >= 5) {
-            if (pLocClean === cleanLocInput) return true;
-            if (p.clientId && selectedClientId && p.clientId === selectedClientId) {
-              if (pLocClean.includes(cleanLocInput) || cleanLocInput.includes(pLocClean)) {
-                return true;
-              }
-            }
-          }
+      // All four core attributes matched simultaneously!
+      return true;
+    });
 
-          return false;
-        });
+    return match || null;
+  }, [existingProjects, selectedClientId, enteredProjectName, capacityValue, enteredLocation, clients]);
 
-        setMatchedExistingProject(match || null);
-      } catch (err) {
-        console.error("Deduplication query error:", err);
-      } finally {
-        setIsDedupChecking(false);
-      }
-    }, 350);
+  // Legitimate Scope Upgrade Condition:
+  // Only display the "UPGRADE PROJECT" banner if an existing project matches the exact Client,
+  // Project Name, Plant Capacity, AND Location, but has a different Scope of Work.
+  const isScopeUpgrade = useMemo(() => {
+    if (!matchedExistingProject || !selectedScope) return false;
+    const existingScope = String(matchedExistingProject.scopeOfWork || "").trim().toLowerCase();
+    const currentScope = String(selectedScope || "").trim().toLowerCase();
+    return Boolean(existingScope && currentScope && existingScope !== currentScope);
+  }, [matchedExistingProject, selectedScope]);
 
-    return () => clearTimeout(timer);
-  }, [enteredProjectName, enteredLocation, selectedClientId]);
+  const isExactDuplicate = useMemo(() => {
+    if (!matchedExistingProject) return false;
+    if (!selectedScope) return true;
+    const existingScope = String(matchedExistingProject.scopeOfWork || "").trim().toLowerCase();
+    const currentScope = String(selectedScope || "").trim().toLowerCase();
+    return existingScope === currentScope;
+  }, [matchedExistingProject, selectedScope]);
 
   const onSubmit = async (data: any) => {
     if (!lockedEmail) return;
 
-    // Strictly disable creation if an exact or highly probable match exists
+    // Strictly disable creation if an exact duplicate or upgrade candidate exists
     if (matchedExistingProject) {
-      setErrorMsg("Project already exists in central registry. Creation is blocked to prevent duplication. Please click 'Upgrade Project' to append new scopes.");
+      if (isScopeUpgrade) {
+        setErrorMsg("This project already exists in the central registry with a different Scope of Work. Please click 'Upgrade Project' to append new scopes.");
+      } else {
+        setErrorMsg("Exact duplicate project detected: This project already exists with the same Scope of Work. Creation is blocked to prevent duplication.");
+      }
       return;
     }
 
@@ -1339,9 +1362,22 @@ function NewProjectTab({ lockedEmail, setActiveTab, currentUser }: { lockedEmail
       const pSnap = await getDocs(collection(db, COLLECTIONS.PROJECTS));
       const totalProjects = pSnap.size;
       
-      const date = new Date();
-      const year = date.getFullYear();
-      const month = (date.getMonth() + 1).toString().padStart(2, '0');
+      const selectedDateStr = data.date ? String(data.date).trim() : getTodayDateString();
+      const todayStr = getTodayDateString();
+      const isToday = selectedDateStr === todayStr;
+
+      let projectCreatedAt: any;
+      if (isToday) {
+        projectCreatedAt = serverTimestamp();
+      } else {
+        // Backdated/past date: set createdAt to match the selected historical date
+        // so date-based payroll and incentive lag logic accurately detects the month
+        const [pYear, pMonth, pDay] = selectedDateStr.split('-').map(Number);
+        const historicalDate = new Date(pYear, pMonth - 1, pDay, 12, 0, 0);
+        projectCreatedAt = Timestamp.fromDate(historicalDate);
+      }
+
+      const [year, month] = selectedDateStr.split('-');
       
       const sequence = (totalProjects + 1).toString().padStart(3, '0');
       const initials = generateClientInitials(client.companyName);
@@ -1351,7 +1387,8 @@ function NewProjectTab({ lockedEmail, setActiveTab, currentUser }: { lockedEmail
         [PROJECT_FIELDS.PROJECT_NAME]: toTitleCase(data.projectName),
         [PROJECT_FIELDS.PROJECT_NUMBER]: srNumber,
         srNumber: srNumber,
-        projectDate: `${year}-${month}-${date.getDate().toString().padStart(2, '0')}`,
+        [PROJECT_FIELDS.DATE]: selectedDateStr,
+        projectDate: selectedDateStr,
         [PROJECT_FIELDS.CLIENT_ID]: client.id,
         [PROJECT_FIELDS.CLIENT_NAME]: client.companyName,
         [PROJECT_FIELDS.SCOPE_OF_WORK]: toTitleCase(data.scopeOfWork),
@@ -1373,7 +1410,7 @@ function NewProjectTab({ lockedEmail, setActiveTab, currentUser }: { lockedEmail
         rate: calculatedPrice ? calculatedPrice.rate : null,
         projectValue: calculatedPrice ? calculatedPrice.total : null,
         projectCost: calculatedPrice ? calculatedPrice.total : null,
-        [PROJECT_FIELDS.CREATED_AT]: serverTimestamp(),
+        [PROJECT_FIELDS.CREATED_AT]: projectCreatedAt,
         [PROJECT_FIELDS.UPDATED_AT]: serverTimestamp(),
       };
       
@@ -1389,6 +1426,7 @@ function NewProjectTab({ lockedEmail, setActiveTab, currentUser }: { lockedEmail
             projectId: projRef.id,
             projectName: payload[PROJECT_FIELDS.PROJECT_NAME],
             projectNumber: srNumber,
+            date: selectedDateStr,
             clientName: client.companyName,
             clientId: client.id,
             scopeOfWork: payload[PROJECT_FIELDS.SCOPE_OF_WORK],
@@ -1413,7 +1451,17 @@ function NewProjectTab({ lockedEmail, setActiveTab, currentUser }: { lockedEmail
         colors: ['#D4AF37', '#1A1A1A', '#4A3728']
       });
       
-      reset();
+      reset({
+        capacityUnit: 'KW',
+        date: getTodayDateString(),
+        projectName: '',
+        clientId: '',
+        scopeOfWork: '',
+        subService: '',
+        plantCapacity: null,
+        location: '',
+        remarks: ''
+      });
       setAssignedScopes({});
       
       setTimeout(() => {
@@ -1440,7 +1488,7 @@ function NewProjectTab({ lockedEmail, setActiveTab, currentUser }: { lockedEmail
       )}
 
       <form onSubmit={handleSubmit(onSubmit)} className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6">
-        <div className="space-y-1 md:col-span-2">
+        <div className="space-y-1">
           <label className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-200">Client *</label>
           <select {...register("clientId")} className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] outline-none">
             <option value="">Select an approved client</option>
@@ -1451,16 +1499,26 @@ function NewProjectTab({ lockedEmail, setActiveTab, currentUser }: { lockedEmail
           {errors.clientId && <p className="text-sm text-rose-500">{errors.clientId.message as string}</p>}
         </div>
 
-        <div className="space-y-1 md:col-span-2">
+        <div className="space-y-1">
           <div className="flex items-center justify-between">
-            <label className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-200">Project Name *</label>
-            {isDedupChecking && (
-              <span className="text-xs text-[#D4AF37] flex items-center gap-1 font-medium animate-pulse">
-                <Loader2 className="w-3 h-3 animate-spin" />
-                Checking registry...
-              </span>
-            )}
+            <label className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-200 flex items-center gap-1.5">
+              <Calendar className="w-4 h-4 text-amber-600 dark:text-[#D4AF37]" />
+              Project Date / Received Date *
+            </label>
+            <span className="text-xs text-gray-500 dark:text-gray-400">
+              Defaults to today
+            </span>
           </div>
+          <input 
+            type="date" 
+            {...register("date")} 
+            className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] outline-none" 
+          />
+          {errors.date && <p className="text-sm text-rose-500">{errors.date.message as string}</p>}
+        </div>
+
+        <div className="space-y-1 md:col-span-2">
+          <label className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-200">Project Name *</label>
           <input 
             type="text" 
             placeholder="e.g. 50kW Rooftop Solar Installation" 
@@ -1507,15 +1565,7 @@ function NewProjectTab({ lockedEmail, setActiveTab, currentUser }: { lockedEmail
         </div>
 
         <div className="space-y-1">
-          <div className="flex items-center justify-between">
-            <label className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-200">Location / Site Address *</label>
-            {isDedupChecking && (
-              <span className="text-xs text-[#D4AF37] flex items-center gap-1 font-medium animate-pulse">
-                <Loader2 className="w-3 h-3 animate-spin" />
-                Checking address...
-              </span>
-            )}
-          </div>
+          <label className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-200">Location / Site Address *</label>
           <input {...register("location")} placeholder="e.g. Plot 42, MIDC Industrial Area, Pune, Maharashtra" className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] outline-none" />
           {errors.location && <p className="text-sm text-rose-500">{errors.location.message as string}</p>}
         </div>
@@ -1670,13 +1720,13 @@ function NewProjectTab({ lockedEmail, setActiveTab, currentUser }: { lockedEmail
           </div>
         )}
 
-        {/* Search-First Deduplication Gate Alert */}
-        {matchedExistingProject && (
+        {/* Search-First Deduplication Gate Alert: Legitimate Scope Upgrade */}
+        {matchedExistingProject && isScopeUpgrade && (
           <div className="md:col-span-2 p-4 sm:p-5 rounded-xl border border-amber-500/50 bg-[#141414] text-white shadow-xl animate-in fade-in slide-in-from-top-2 duration-300">
             <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
               <div className="flex items-start gap-3.5">
                 <div className="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center shrink-0 mt-0.5 text-[#D4AF37]">
-                  <AlertCircle className="w-5 h-5" />
+                  <Sparkles className="w-5 h-5" />
                 </div>
                 <div className="space-y-1">
                   <div className="flex flex-wrap items-center gap-2">
@@ -1688,7 +1738,10 @@ function NewProjectTab({ lockedEmail, setActiveTab, currentUser }: { lockedEmail
                     </span>
                   </div>
                   <p className="text-xs sm:text-sm text-gray-300">
-                    A project matching <span className="font-semibold text-white">&quot;{matchedExistingProject.projectName}&quot;</span> (Client: <span className="text-white font-semibold">{matchedExistingProject.clientName}</span>, Location: <span className="text-white font-semibold">{matchedExistingProject.location}</span>) is already registered in the central database.
+                    A project matching <span className="font-semibold text-white">&quot;{matchedExistingProject.projectName}&quot;</span> (Client: <span className="text-white font-semibold">{matchedExistingProject.clientName}</span>, Location: <span className="text-white font-semibold">{matchedExistingProject.location}</span>) is already registered with scope <span className="text-amber-400 font-semibold">&quot;{matchedExistingProject.scopeOfWork || "Standard"}&quot;</span>.
+                  </p>
+                  <p className="text-xs text-amber-400/90 pt-1">
+                    You have selected a different Scope of Work (&quot;{selectedScope}&quot;). Click <strong>Upgrade Project</strong> to append this new scope to the existing project instead of creating a duplicate.
                   </p>
                   <div className="flex flex-wrap items-center gap-2 pt-1 text-xs text-gray-400">
                     <span>Registered Scope:</span>
@@ -1716,6 +1769,33 @@ function NewProjectTab({ lockedEmail, setActiveTab, currentUser }: { lockedEmail
           </div>
         )}
 
+        {/* Search-First Deduplication Gate Alert: Exact Duplicate */}
+        {matchedExistingProject && isExactDuplicate && (
+          <div className="md:col-span-2 p-4 sm:p-5 rounded-xl border border-rose-500/50 bg-[#141414] text-white shadow-xl animate-in fade-in slide-in-from-top-2 duration-300">
+            <div className="flex items-start gap-3.5">
+              <div className="w-10 h-10 rounded-xl bg-rose-500/20 border border-rose-500/40 flex items-center justify-center shrink-0 mt-0.5 text-rose-400">
+                <AlertCircle className="w-5 h-5" />
+              </div>
+              <div className="space-y-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-base sm:text-lg font-bold text-white tracking-wide">
+                    Exact Duplicate Project Detected
+                  </span>
+                  <span className="px-2 py-0.5 text-xs font-mono font-bold rounded bg-rose-500/20 text-rose-300 border border-rose-500/30">
+                    {matchedExistingProject.projectNumber || matchedExistingProject.srNumber || "REGISTERED"}
+                  </span>
+                </div>
+                <p className="text-xs sm:text-sm text-gray-300">
+                  A project matching <span className="font-semibold text-white">&quot;{matchedExistingProject.projectName}&quot;</span> with the exact same Client, Capacity ({matchedExistingProject.plantCapacity || "N/A"} {matchedExistingProject.capacityUnit || ""}), Location, and Scope of Work (&quot;{matchedExistingProject.scopeOfWork}&quot;) is already registered in the central database.
+                </p>
+                <p className="text-xs text-rose-400 pt-1">
+                  Creation is blocked to prevent duplication. If you need to request additional scopes, please select a different Scope of Work above.
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
         <div className="md:col-span-2 flex justify-end mt-2 sm:mt-4">
           <button
             type="submit"
@@ -1734,7 +1814,11 @@ function NewProjectTab({ lockedEmail, setActiveTab, currentUser }: { lockedEmail
             ) : matchedExistingProject ? (
               <>
                 <Lock className="w-4 h-4 text-gray-500" />
-                <span>Submission Blocked: Project Already Exists</span>
+                <span>
+                  {isScopeUpgrade
+                    ? "Submission Blocked: Use Upgrade Project"
+                    : "Submission Blocked: Exact Duplicate Exists"}
+                </span>
               </>
             ) : (
               <>
@@ -1759,7 +1843,6 @@ function NewProjectTab({ lockedEmail, setActiveTab, currentUser }: { lockedEmail
             setToastMsg(msg);
             reset();
             setAssignedScopes({});
-            setMatchedExistingProject(null);
             setTimeout(() => {
               setActiveTab("my_projects");
             }, 1500);
@@ -1837,51 +1920,76 @@ function MyProjectsTab({ lockedEmail, currentUser }: { lockedEmail: string | nul
       return;
     }
 
-    // Fetch roster strictly from employees collection using Master Blueprint schema
+    // Fetch active designers from both employees and users collections
+    let cachedEmpDocs: any[] = [];
+    let cachedUserDocs: any[] = [];
+
+    const syncDesigners = () => {
+      const activeDesigners = filterAndDeduplicateDesigners(cachedEmpDocs, cachedUserDocs);
+      setDesigners(activeDesigners);
+    };
+
     const eq = query(collection(db, COLLECTIONS.EMPLOYEES));
     const unsubD = onSnapshot(eq, (snapshot) => {
-      if (!snapshot.empty) {
-        const list = snapshot.docs.map(doc => {
-          const data = doc.data();
-          return {
-            id: doc.id,
-            name: data.name || data.email || "Unnamed Employee",
-            email: data.email || "",
-            department: data.department || "",
-            designation: data.designation || "",
-            role: data.role || "",
-            employeeId: data.employeeId || ""
-          };
-        }).filter(emp => Boolean(emp.email));
-
-        const designStaff = list.filter(emp => {
-          const dept = emp.department.toLowerCase();
-          const role = emp.role.toLowerCase();
-          const desig = emp.designation.toLowerCase();
-          return dept.includes('design') || dept.includes('eng') || role.includes('designer') || role.includes('engineer') || desig.includes('design') || desig.includes('engineer');
-        });
-
-        setDesigners(designStaff.length > 0 ? designStaff : list);
-      } else {
-        setDesigners([]);
-      }
+      cachedEmpDocs = snapshot.docs;
+      syncDesigners();
     }, (err) => {
       console.error("Failed to query employees roster in MyProjectsTab:", err);
-      setDesigners([]);
     });
-    return () => unsubD();
+
+    const uq = query(collection(db, COLLECTIONS.USERS));
+    const unsubU = onSnapshot(uq, (snapshot) => {
+      cachedUserDocs = snapshot.docs;
+      syncDesigners();
+    }, (err) => {
+      console.error("Failed to query users roster in MyProjectsTab:", err);
+    });
+
+    return () => {
+      unsubD();
+      unsubU();
+    };
   }, [currentUser]);
 
-  // Fetch available scopes definition for Upgrade Project
+  // Fetch available scopes and packages dynamically from Firestore for Upgrade Project
   useEffect(() => {
+    let cachedScopes: any[] = [];
+    let cachedPackages: any[] = [];
+
+    const syncScopesData = () => {
+      const combined = [...cachedScopes, ...cachedPackages];
+      const seen = new Set<string>();
+      const list: any[] = [];
+      for (const item of combined) {
+        const name = (item.name || item.packageName || item.title || "").trim();
+        if (name && !seen.has(name.toLowerCase())) {
+          seen.add(name.toLowerCase());
+          list.push({ ...item, name });
+        }
+      }
+      setScopesData(list);
+    };
+
     const sq = query(collection(db, COLLECTIONS.SCOPES));
     const unsubS = onSnapshot(sq, (snap) => {
-      setScopesData(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      cachedScopes = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      syncScopesData();
     }, (err) => {
       console.error("Failed to query scopes in MyProjectsTab:", err);
-      setScopesData([]);
     });
-    return () => unsubS();
+
+    const pkQ = query(collection(db, "packages"));
+    const unsubPk = onSnapshot(pkQ, (snap) => {
+      cachedPackages = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      syncScopesData();
+    }, (err) => {
+      console.error("Failed to query packages in MyProjectsTab:", err);
+    });
+
+    return () => {
+      unsubS();
+      unsubPk();
+    };
   }, []);
 
   const handleReassignDesigner = async (projectId: string, designerEmail: string) => {
@@ -1988,7 +2096,8 @@ function MyProjectsTab({ lockedEmail, currentUser }: { lockedEmail: string | nul
       const clientName = (p.clientName || "").toLowerCase();
       const projectNumber = (p.projectNumber || p.srNumber || "").toLowerCase();
       const projectName = (p.projectName || "").toLowerCase();
-      return clientName.includes(queryStr) || projectNumber.includes(queryStr) || projectName.includes(queryStr);
+      const projectDate = (p.date || p.projectDate || "").toLowerCase();
+      return clientName.includes(queryStr) || projectNumber.includes(queryStr) || projectName.includes(queryStr) || projectDate.includes(queryStr);
     });
   }, [projects, searchQuery]);
 
@@ -2084,6 +2193,7 @@ function MyProjectsTab({ lockedEmail, currentUser }: { lockedEmail: string | nul
               <thead className="bg-gray-50 dark:bg-transparent border-b border-gray-200 dark:border-[#333333]">
                 <tr className="text-gray-600 dark:text-gray-400 text-xs sm:text-sm uppercase font-semibold">
                   <th className="py-3 px-4">SR. No</th>
+                  <th className="py-3 px-4">Date</th>
                   <th className="py-3 px-4">Client Name</th>
                   <th className="py-3 px-4">Project Name</th>
                   <th className="py-3 px-4">Scope</th>
@@ -2097,6 +2207,9 @@ function MyProjectsTab({ lockedEmail, currentUser }: { lockedEmail: string | nul
                 {filteredProjects.map(p => (
                   <tr key={p.id} className="transition-colors hover:bg-gray-50 dark:hover:bg-[#2A2A2A]">
                     <td className="py-3 px-4 font-medium text-gray-800 dark:text-gray-200">{p.projectNumber || p.srNumber || '-'}</td>
+                    <td className="py-3 px-4 text-gray-600 dark:text-gray-300 whitespace-nowrap text-xs sm:text-sm font-medium">
+                      {p.date || p.projectDate || (p.createdAt?.toDate ? format(p.createdAt.toDate(), 'yyyy-MM-dd') : '-')}
+                    </td>
                     <td className="py-3 px-4 text-gray-800 dark:text-gray-200 font-medium">
                       {toTitleCase(p.clientName)}
                     </td>
