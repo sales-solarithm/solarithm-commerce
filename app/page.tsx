@@ -23,8 +23,21 @@ const clientSchema = z.object({
   contactPerson: z.string().min(1, "Contact Person is required"),
   city: z.string().min(1, "City is required"),
   gstin: z.string().optional(),
+  billingAddress: z.string().optional(),
   proposalNumber: z.string().min(1, "Proposal Number is required"),
+}).superRefine((data, ctx) => {
+  const hasGstin = Boolean(data.gstin && data.gstin.trim().length > 0);
+  const hasBillingAddress = Boolean(data.billingAddress && data.billingAddress.trim().length > 0);
+  if (hasGstin && !hasBillingAddress) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Billing Address is required when GSTIN is provided",
+      path: ["billingAddress"],
+    });
+  }
 });
+
+type ClientFormData = z.infer<typeof clientSchema>;
 
 const projectSchema = z.object({
   projectName: z.string().min(1, "Project Name is required"),
@@ -687,9 +700,15 @@ function RegisterClientTab({ lockedEmail, currentUser }: { lockedEmail: string |
   const [loadingClients, setLoadingClients] = useState(true);
   const [proposals, setProposals] = useState<any[]>([]);
 
-  const { register, handleSubmit, reset, formState: { errors } } = useForm({
+  const { register, handleSubmit, reset, control, formState: { errors } } = useForm<ClientFormData>({
     resolver: zodResolver(clientSchema)
   });
+
+  const watchedGstin = useWatch({
+    control,
+    name: "gstin"
+  });
+  const isGstinProvided = Boolean(watchedGstin && watchedGstin.trim().length > 0);
 
   useEffect(() => {
     // Strictly defer data fetching until Firebase currentUser is defined and loaded
@@ -726,7 +745,7 @@ function RegisterClientTab({ lockedEmail, currentUser }: { lockedEmail: string |
     };
   }, [lockedEmail, currentUser]);
 
-  const onSubmit = async (data: any) => {
+  const onSubmit = async (data: ClientFormData) => {
     if (!lockedEmail) return;
     setIsSubmitting(true);
     setSuccessMsg("");
@@ -740,7 +759,8 @@ function RegisterClientTab({ lockedEmail, currentUser }: { lockedEmail: string |
         [CLIENT_FIELDS.COMPANY_NAME]: toTitleCase(data.companyName),
         [CLIENT_FIELDS.CONTACT_PERSON]: toTitleCase(data.contactPerson),
         [CLIENT_FIELDS.CITY]: toTitleCase(data.city),
-        [CLIENT_FIELDS.GSTIN]: data.gstin ? data.gstin.toUpperCase() : "",
+        [CLIENT_FIELDS.GSTIN]: data.gstin ? data.gstin.toUpperCase().trim() : "",
+        [CLIENT_FIELDS.BILLING_ADDRESS]: data.billingAddress ? data.billingAddress.trim() : "",
         [CLIENT_FIELDS.PROPOSAL_NUMBER]: data.proposalNumber,
         [CLIENT_FIELDS.PRICING_CATEGORY]: pricingCategory,
         [CLIENT_FIELDS.STATUS]: CLIENT_STATUS.PENDING,
@@ -868,7 +888,38 @@ function RegisterClientTab({ lockedEmail, currentUser }: { lockedEmail: string |
 
           <div className="space-y-1 md:col-span-2">
             <label className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-200">GSTIN (Optional)</label>
-            <input {...register("gstin")} className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] outline-none" />
+            <input
+              {...register("gstin")}
+              placeholder="e.g. 24ABCDE1234F1Z5"
+              className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] outline-none uppercase font-mono text-sm sm:text-base"
+            />
+            {errors.gstin && <p className="text-sm text-rose-500">{errors.gstin.message as string}</p>}
+          </div>
+
+          <div className="space-y-1 md:col-span-2">
+            <div className="flex items-center justify-between">
+              <label className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-200">
+                Billing Address / Registered Office Address {isGstinProvided ? <span className="text-rose-500 font-bold">*</span> : <span className="text-gray-400 font-normal text-xs">(Optional)</span>}
+              </label>
+              {isGstinProvided && (
+                <span className="text-xs font-medium text-amber-600 dark:text-[#D4AF37]">
+                  Mandatory when GSTIN is provided
+                </span>
+              )}
+            </div>
+            <textarea
+              {...register("billingAddress")}
+              rows={3}
+              placeholder="Complete registered office address, building, street, city, state, and PIN code for billing/invoicing"
+              className={`w-full p-2.5 rounded-lg border ${
+                errors.billingAddress
+                  ? "border-rose-500 focus:ring-rose-500"
+                  : "border-gray-300 dark:border-[#2A2A2A] focus:ring-[#D4AF37] focus-within:border-[#D4AF37]"
+              } bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 outline-none text-sm sm:text-base resize-y transition-colors`}
+            />
+            {errors.billingAddress && (
+              <p className="text-sm text-rose-500 font-medium">{errors.billingAddress.message as string}</p>
+            )}
           </div>
 
           <div className="md:col-span-2 flex justify-end mt-2 sm:mt-4">
@@ -902,6 +953,7 @@ function RegisterClientTab({ lockedEmail, currentUser }: { lockedEmail: string |
                 <tr className="text-gray-600 dark:text-gray-400 text-xs sm:text-sm uppercase font-semibold">
                   <th className="py-3 px-4">Company Name</th>
                   <th className="py-3 px-4">City</th>
+                  <th className="py-3 px-4">GSTIN & Address</th>
                   <th className="py-3 px-4">Proposal</th>
                   <th className="py-3 px-4">Status</th>
                   <th className="py-3 px-4">Date</th>
@@ -912,6 +964,14 @@ function RegisterClientTab({ lockedEmail, currentUser }: { lockedEmail: string |
                   <tr key={client.id} className="transition-colors hover:bg-gray-50 dark:hover:bg-[#2A2A2A]">
                     <td className="py-3 px-4 font-medium text-gray-800 dark:text-gray-200">{toTitleCase(client.companyName)}</td>
                     <td className="py-3 px-4 text-gray-700 dark:text-gray-200">{toTitleCase(client.city)}</td>
+                    <td className="py-3 px-4 text-gray-700 dark:text-gray-200">
+                      <div className="font-mono text-xs">{client.gstin || <span className="text-gray-400 font-sans">No GSTIN</span>}</div>
+                      {client.billingAddress && (
+                        <div className="text-xs text-gray-500 dark:text-gray-400 truncate max-w-[220px]" title={client.billingAddress}>
+                          {client.billingAddress}
+                        </div>
+                      )}
+                    </td>
                     <td className="py-3 px-4 text-gray-700 dark:text-gray-200">{client.proposalNumber}</td>
                     <td className="py-3 px-4">
                       <span className={`inline-block px-2 py-1 rounded text-xs font-medium border text-center ${getStatusColor(client.status)}`}>
