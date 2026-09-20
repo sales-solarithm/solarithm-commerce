@@ -109,7 +109,7 @@ export default function ProjectEntryTool() {
       return;
     }
 
-    const normalizedEmail = enteredEmail.toLowerCase().trim();
+    const normalizedEmail = enteredEmail.trim().toLowerCase();
     setIsVerifyingEmail(true);
     setErrorMessage("");
 
@@ -125,44 +125,30 @@ export default function ProjectEntryTool() {
     }
 
     try {
-      // 1. Query employees collection directly per Master Blueprint
-      const empRef = collection(db, COLLECTIONS.EMPLOYEES);
-      const empQ = query(empRef, where("email", "==", normalizedEmail));
-      const empSnap = await getDocs(empQ);
-      let userData: any = null;
+      // 1. Query users collection where email == normalizedEmail per Admin Console schema
+      const usersRef = collection(db, COLLECTIONS.USERS);
+      const usersQ = query(usersRef, where("email", "==", normalizedEmail));
+      const querySnapshot = await getDocs(usersQ);
 
-      if (!empSnap.empty) {
-        userData = empSnap.docs[0].data();
-      } else {
-        // Fallback to users collection
-        const usersRef = collection(db, COLLECTIONS.USERS);
-        const usersQ = query(usersRef, where("email", "==", normalizedEmail));
-        const usersSnap = await getDocs(usersQ);
-        if (!usersSnap.empty) {
-          userData = usersSnap.docs[0].data();
-        }
-      }
-
-      if (!userData) {
-        setErrorMessage("Access Denied: You do not have permission to access Solarithm Commerce.");
+      // 2. If no user document is found, display specific message
+      if (querySnapshot.empty) {
+        setErrorMessage("No account found with this email.");
         setIsVerifyingEmail(false);
         return;
       }
 
-      // Normalize the fetched role string to lowercase to prevent case-sensitive mismatches
-      const roleStr = String(userData.role || "").toLowerCase().trim();
-      const deptStr = String(userData.department || "").toLowerCase().trim();
-      const assignedRoleStr = String(userData.assignedRole || "").toLowerCase().trim();
+      // 3. Retrieve user document data and check accessibleApps
+      const userDoc = querySnapshot.docs[0].data();
+      const accessibleApps: string[] = userDoc.accessibleApps || [];
 
-      // Grant immediate access ONLY if the role is strictly "admin", "owner", or "sales"
-      const ALLOWED_ROLES = ["admin", "owner", "sales"];
-      const matchedRole = [roleStr, deptStr, assignedRoleStr].find(r => ALLOWED_ROLES.includes(r));
+      // Check permission:
+      const hasPermission = accessibleApps.includes("solarithm_commerce") || userDoc.role === "owner" || userDoc.role === "admin";
 
-      if (matchedRole) {
+      if (hasPermission) {
         setIsAuthenticated(true);
         setUserEmail(normalizedEmail);
-        setUserRole(matchedRole);
-        setUserName(userData.name || normalizedEmail);
+        setUserRole(userDoc.role || userDoc.assignedRole || "sales");
+        setUserName(userDoc.name || normalizedEmail);
         setErrorMessage("");
       } else {
         setErrorMessage("Access Denied: You do not have permission to access Solarithm Commerce.");

@@ -71,6 +71,7 @@ export interface EmployeeRecord {
 export interface UserRecord extends Partial<EmployeeRecord> {
   id?: string;
   assignedRole?: 'owner' | 'admin' | 'sales' | 'employee' | string;
+  accessibleApps?: string[];
 }
 
 export interface RegisteredAppItem {
