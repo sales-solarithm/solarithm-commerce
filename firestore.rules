@@ -16,7 +16,7 @@ service cloud.firestore {
 
     // Employees collection - master directory
     match /employees/{employeeId} {
-      allow read: if request.auth != null;
+      allow read: if request.time != null;
       allow write: if hasRole(['admin', 'owner']);
     }
 
@@ -29,7 +29,12 @@ service cloud.firestore {
 
     // Registered apps registry
     match /registeredApps/{appId} {
-      allow read: if request.auth != null;
+      allow read: if request.time != null;
+      allow write: if hasRole(['admin', 'owner']);
+    }
+
+    match /apps/{appId} {
+      allow read: if request.time != null;
       allow write: if hasRole(['admin', 'owner']);
     }
 

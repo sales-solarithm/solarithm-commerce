@@ -49,15 +49,72 @@ const INDIAN_STATES = [
 
 // --- MAIN COMPONENT ---
 export default function ProjectEntryTool() {
-  // 1. Strict Ephemeral Session (pure React useState - wiped completely on browser refresh)
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [userEmail, setUserEmail] = useState<string | null>(null);
-  const [userRole, setUserRole] = useState<string | null>(null);
-  const [userName, setUserName] = useState<string | null>(null);
+  // Restore existing active session from sessionStorage if available
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    try {
+      const stored = sessionStorage.getItem("solarithm_commerce_session");
+      if (stored) {
+        const session = JSON.parse(stored);
+        return Boolean(session?.authenticated);
+      }
+    } catch {
+      // Ignore storage read errors
+    }
+    return false;
+  });
+
+  const [userEmail, setUserEmail] = useState<string | null>(() => {
+    if (typeof window === "undefined") return null;
+    try {
+      const stored = sessionStorage.getItem("solarithm_commerce_session");
+      if (stored) {
+        const session = JSON.parse(stored);
+        return session?.email || null;
+      }
+    } catch {
+      // Ignore
+    }
+    return null;
+  });
+
+  const [userRole, setUserRole] = useState<string | null>(() => {
+    if (typeof window === "undefined") return null;
+    try {
+      const stored = sessionStorage.getItem("solarithm_commerce_session");
+      if (stored) {
+        const session = JSON.parse(stored);
+        return session?.role || null;
+      }
+    } catch {
+      // Ignore
+    }
+    return null;
+  });
+
+  const [userName, setUserName] = useState<string | null>(() => {
+    if (typeof window === "undefined") return null;
+    try {
+      const stored = sessionStorage.getItem("solarithm_commerce_session");
+      if (stored) {
+        const session = JSON.parse(stored);
+        return session?.name || null;
+      }
+    } catch {
+      // Ignore
+    }
+    return null;
+  });
 
   const [tempEmail, setTempEmail] = useState("");
   const [isVerifyingEmail, setIsVerifyingEmail] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
+  const [deniedAppDiagnostics, setDeniedAppDiagnostics] = useState<{
+    apps: string[];
+    email: string;
+    role: string;
+    dept: string;
+  } | null>(null);
   const [activeTab, setActiveTab] = useState<"register" | "new_project" | "my_projects">("new_project");
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
@@ -75,6 +132,11 @@ export default function ProjectEntryTool() {
         setUserRole(null);
         setUserName(null);
         setErrorMessage("Session expired due to inactivity. Please log in again.");
+        try {
+          sessionStorage.removeItem("solarithm_commerce_session");
+        } catch {
+          // Ignore
+        }
       }, 300000);
     };
 
@@ -101,17 +163,52 @@ export default function ProjectEntryTool() {
     setUserName(null);
     setTempEmail("");
     setErrorMessage("");
+    setDeniedAppDiagnostics(null);
+    try {
+      sessionStorage.removeItem("solarithm_commerce_session");
+    } catch {
+      // Ignore
+    }
+  };
+
+  // Cross-checks against potential naming formats (slugs, display names, snake_case variants)
+  const isCommerceAppIdentifier = (appId: string): boolean => {
+    if (!appId || typeof appId !== "string") return false;
+    const raw = appId.trim();
+    const normalized = raw.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+    const knownExact = [
+      "solarithm_commerce",
+      "solarithm-commerce",
+      "solarithm commerce",
+      "commerce",
+      "project_entry",
+      "project-entry",
+      "projectentry"
+    ];
+    if (knownExact.includes(raw.toLowerCase())) return true;
+    if (normalized === "solarithmcommerce" || normalized === "commerce" || normalized === "projectentry") {
+      return true;
+    }
+    if (normalized.includes("commerce") || (normalized.includes("project") && normalized.includes("entry"))) {
+      return true;
+    }
+    return false;
   };
 
   const handleUnlock = async (enteredEmail: string) => {
     if (!enteredEmail || !enteredEmail.trim()) {
       setErrorMessage("Please enter your work email.");
+      setDeniedAppDiagnostics(null);
       return;
     }
 
+    // 1. User Identification & Lookup:
+    // Ensure check ignores trailing spaces and letter casing so matches are exact
     const normalizedEmail = enteredEmail.trim().toLowerCase();
     setIsVerifyingEmail(true);
     setErrorMessage("");
+    setDeniedAppDiagnostics(null);
 
     // Super Admin Bypass
     const SUPER_ADMIN_EMAILS = ["jayjalpa2002@gmail.com", "jay.solarithm@gmail.com"];
@@ -121,41 +218,216 @@ export default function ProjectEntryTool() {
       setUserRole("owner");
       setUserName(normalizedEmail);
       setIsVerifyingEmail(false);
+      try {
+        sessionStorage.setItem("solarithm_commerce_session", JSON.stringify({
+          authenticated: true,
+          email: normalizedEmail,
+          role: "owner",
+          name: normalizedEmail,
+          timestamp: Date.now()
+        }));
+      } catch {
+        // Ignore
+      }
       return;
     }
 
     try {
-      // 1. Query users collection where email == normalizedEmail per Admin Console schema
       const usersRef = collection(db, COLLECTIONS.USERS);
+      let userDoc: any = null;
+      let userId: string = "";
+
+      // Exact match query on users collection
       const usersQ = query(usersRef, where("email", "==", normalizedEmail));
       const querySnapshot = await getDocs(usersQ);
 
-      // 2. If no user document is found, display specific message
-      if (querySnapshot.empty) {
+      if (!querySnapshot.empty) {
+        userDoc = querySnapshot.docs[0].data();
+        userId = querySnapshot.docs[0].id;
+      } else {
+        // Fallback case-sensitive query if email was stored with original casing
+        const enteredTrimmed = enteredEmail.trim();
+        if (enteredTrimmed !== normalizedEmail) {
+          const caseQ = query(usersRef, where("email", "==", enteredTrimmed));
+          const caseSnap = await getDocs(caseQ);
+          if (!caseSnap.empty) {
+            userDoc = caseSnap.docs[0].data();
+            userId = caseSnap.docs[0].id;
+          }
+        }
+      }
+
+      // If still not matched, scan all user records in users collection to guarantee
+      // case-insensitive and whitespace-insensitive matching
+      if (!userDoc) {
+        const allUsersSnap = await getDocs(usersRef);
+        const matchedDoc = allUsersSnap.docs.find(d => {
+          const data = d.data();
+          const dEmail = (data.email || "").trim().toLowerCase();
+          const dPersonalEmail = (data.personalEmailAddress || "").trim().toLowerCase();
+          const docId = d.id.trim().toLowerCase();
+          return dEmail === normalizedEmail || dPersonalEmail === normalizedEmail || docId === normalizedEmail;
+        });
+        if (matchedDoc) {
+          userDoc = matchedDoc.data();
+          userId = matchedDoc.id;
+        }
+      }
+
+      // Secondary lookup: check employees collection
+      if (!userDoc) {
+        const empRef = collection(db, COLLECTIONS.EMPLOYEES);
+        const empQ = query(empRef, where("email", "==", normalizedEmail));
+        const empSnap = await getDocs(empQ);
+        if (!empSnap.empty) {
+          userDoc = empSnap.docs[0].data();
+          userId = empSnap.docs[0].id;
+        } else {
+          const allEmpSnap = await getDocs(empRef);
+          const matchedEmp = allEmpSnap.docs.find(d => {
+            const data = d.data();
+            const dEmail = (data.email || "").trim().toLowerCase();
+            return dEmail === normalizedEmail || d.id.trim().toLowerCase() === normalizedEmail;
+          });
+          if (matchedEmp) {
+            userDoc = matchedEmp.data();
+            userId = matchedEmp.id;
+          }
+        }
+      }
+
+      // If no user document is found across the database
+      if (!userDoc) {
         setErrorMessage("No account found with this email.");
+        setDeniedAppDiagnostics(null);
         setIsVerifyingEmail(false);
         return;
       }
 
-      // 3. Retrieve user document data and check accessibleApps
-      const userDoc = querySnapshot.docs[0].data();
-      const accessibleApps: string[] = userDoc.accessibleApps || [];
+      // 2. Access Validation Logic:
+      // Reference the exact document structure and field: accessibleApps
+      const accessibleApps: string[] = Array.isArray(userDoc.accessibleApps)
+        ? userDoc.accessibleApps
+        : (Array.isArray(userDoc.assignedApps) ? userDoc.assignedApps : (Array.isArray(userDoc.apps) ? userDoc.apps : []));
 
-      // Check permission:
-      const hasPermission = accessibleApps.includes("solarithm_commerce") || userDoc.role === "owner" || userDoc.role === "admin";
+      // Cross-check against potential naming formats (slugs, display names, snake_case variants)
+      const hasAppPermission = accessibleApps.some(appId => isCommerceAppIdentifier(appId));
+
+      // Automatic grant: administrative role or Sales department
+      const roleStr = String(userDoc.role || "").toLowerCase().trim();
+      const assignedRoleStr = String(userDoc.assignedRole || "").toLowerCase().trim();
+      const deptStr = String(userDoc.department || "").toLowerCase().trim();
+      const designationStr = String(userDoc.designation || "").toLowerCase().trim();
+
+      const isAdminRole = ["admin", "owner", "administrator", "superadmin", "management", "director"].some(
+        r => roleStr === r || assignedRoleStr === r || designationStr.includes(r)
+      );
+
+      const isSalesDept = ["sales", "commercial", "business development", "presales", "pre-sales"].some(
+        s => deptStr.includes(s) || roleStr.includes(s) || assignedRoleStr.includes(s) || designationStr.includes(s)
+      );
+
+      // Check companion app registry allowedEmployees if applicable
+      let hasRegistryEmployeeAccess = false;
+      const employeeId = userDoc.employeeId || userId || "";
+      if (employeeId) {
+        try {
+          const appDocRef = doc(db, "apps", "solarithm_commerce");
+          const appDocSnap = await getDoc(appDocRef);
+          if (appDocSnap.exists()) {
+            const allowedEmployees: string[] = appDocSnap.data().allowedEmployees || [];
+            if (allowedEmployees.includes(employeeId) || allowedEmployees.includes(normalizedEmail)) {
+              hasRegistryEmployeeAccess = true;
+            }
+          }
+        } catch {
+          // non-blocking companion check
+        }
+        if (!hasRegistryEmployeeAccess) {
+          try {
+            const appDocRef2 = doc(db, "registeredApps", "solarithm-commerce");
+            const appDocSnap2 = await getDoc(appDocRef2);
+            if (appDocSnap2.exists()) {
+              const allowedEmployees: string[] = appDocSnap2.data().allowedEmployees || [];
+              if (allowedEmployees.includes(employeeId) || allowedEmployees.includes(normalizedEmail)) {
+                hasRegistryEmployeeAccess = true;
+              }
+            }
+          } catch {
+            // non-blocking companion check
+          }
+        }
+      }
+
+      const hasPermission = isAdminRole || isSalesDept || hasAppPermission || hasRegistryEmployeeAccess;
 
       if (hasPermission) {
+        // 4. Session Activation:
+        // Once validated, store active user state and redirect directly into the workspace
+        const derivedRole = isAdminRole ? (roleStr.includes("owner") ? "owner" : "admin") : (isSalesDept ? "sales" : (userDoc.role || userDoc.assignedRole || "sales"));
+        const displayName = userDoc.name || normalizedEmail;
+
         setIsAuthenticated(true);
         setUserEmail(normalizedEmail);
-        setUserRole(userDoc.role || userDoc.assignedRole || "sales");
-        setUserName(userDoc.name || normalizedEmail);
+        setUserRole(derivedRole);
+        setUserName(displayName);
         setErrorMessage("");
+        setDeniedAppDiagnostics(null);
+
+        try {
+          sessionStorage.setItem("solarithm_commerce_session", JSON.stringify({
+            authenticated: true,
+            email: normalizedEmail,
+            role: derivedRole,
+            name: displayName,
+            timestamp: Date.now()
+          }));
+        } catch {
+          // Ignore
+        }
       } else {
+        // 3. Error Handling & Diagnostics:
+        // Print retrieved list of assigned app identifiers directly to browser console
+        console.warn(
+          `[Solarithm Commerce] Access Denied for ${normalizedEmail}. Retrieved assigned app identifiers:`,
+          accessibleApps,
+          `User profile:`,
+          userDoc
+        );
+
+        // Display on-screen alongside denial notice
+        setDeniedAppDiagnostics({
+          apps: accessibleApps,
+          email: normalizedEmail,
+          role: userDoc.role || userDoc.assignedRole || "Unassigned",
+          dept: userDoc.department || "Unassigned"
+        });
+
         setErrorMessage("Access Denied: You do not have permission to access Solarithm Commerce.");
       }
     } catch (error: any) {
       console.error("Error verifying access in Solarithm directory:", error);
-      setErrorMessage("Access Denied: You do not have permission to access Solarithm Commerce.");
+      setDeniedAppDiagnostics(null);
+
+      // Do not display generic denial errors if network or database read timeouts occur; handle as connection notices
+      const errMsg = error?.message || String(error);
+      const errCode = error?.code || "";
+
+      if (
+        errCode.includes("unavailable") ||
+        errCode.includes("deadline-exceeded") ||
+        errCode.includes("network") ||
+        errMsg.toLowerCase().includes("timeout") ||
+        errMsg.toLowerCase().includes("network") ||
+        errMsg.toLowerCase().includes("failed to fetch") ||
+        errMsg.toLowerCase().includes("offline")
+      ) {
+        setErrorMessage("Connection Notice: Unable to connect to the database server. Please check your network connection and try again.");
+      } else if (errCode.includes("permission-denied")) {
+        setErrorMessage("Security Notice: Database read permission error. Please verify access rules with your administrator.");
+      } else {
+        setErrorMessage(`Connection Notice: Unable to verify permissions (${errMsg || "Database read timeout"}). Please try again.`);
+      }
     } finally {
       setIsVerifyingEmail(false);
     }
@@ -202,9 +474,39 @@ export default function ProjectEntryTool() {
             </div>
 
             {errorMessage && (
-              <p className="text-red-500 text-sm sm:text-base text-left font-medium">
-                {errorMessage}
-              </p>
+              <div className="text-left space-y-2">
+                <p className="text-red-500 text-sm sm:text-base font-medium">
+                  {errorMessage}
+                </p>
+                {deniedAppDiagnostics && (
+                  <div className="p-3 bg-red-950/40 border border-red-800/60 rounded-lg text-xs text-red-200">
+                    <div className="flex items-center gap-1.5 font-semibold text-red-100 mb-1.5">
+                      <AlertCircle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                      <span>Permission Diagnostics</span>
+                    </div>
+                    <div className="space-y-1 text-gray-300">
+                      <p><span className="text-gray-400">Account:</span> {deniedAppDiagnostics.email}</p>
+                      <p><span className="text-gray-400">Role / Dept:</span> {deniedAppDiagnostics.role} &bull; {deniedAppDiagnostics.dept}</p>
+                      <div className="pt-1.5 border-t border-red-900/50">
+                        <span className="text-gray-400">Assigned Apps in Profile:</span>
+                        {deniedAppDiagnostics.apps.length > 0 ? (
+                          <div className="flex flex-wrap gap-1 mt-1">
+                            {deniedAppDiagnostics.apps.map((app, idx) => (
+                              <span key={idx} className="px-1.5 py-0.5 rounded bg-black/60 border border-red-700/50 font-mono text-[11px] text-amber-300">
+                                {app}
+                              </span>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="text-amber-200/70 italic text-[11px] mt-0.5">
+                            No application identifiers currently assigned (accessibleApps is empty)
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
             )}
 
             <button
