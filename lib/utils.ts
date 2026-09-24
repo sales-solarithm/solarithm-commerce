@@ -1,5 +1,6 @@
 import { clsx, type ClassValue } from "clsx"
 import { twMerge } from "tailwind-merge"
+import { format } from "date-fns"
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
@@ -249,4 +250,134 @@ export function filterAndDeduplicateDesigners(empDocs: any[], userDocs: any[] = 
     employeeId: d.employeeId
   }));
 }
+
+/**
+ * Safely extracts epoch milliseconds from any date representation:
+ * - Firestore Timestamp with .toMillis()
+ * - Objects with { seconds, nanoseconds }
+ * - JavaScript Date instance with .getTime()
+ * - ISO string or any plain date string parsed via new Date(value).getTime()
+ * - Epoch number in milliseconds or seconds
+ * - Missing, null, or invalid values safely fall back to 0.
+ */
+export function getSafeTimestampMillis(value: any): number {
+  if (value == null) return 0;
+
+  try {
+    // 1. If value is a Firestore Timestamp with a .toMillis function, use .toMillis()
+    if (typeof value.toMillis === "function") {
+      const millis = value.toMillis();
+      return typeof millis === "number" && !isNaN(millis) ? millis : 0;
+    }
+
+    // 2. If it has seconds and nanoseconds properties, calculate epoch milliseconds from seconds
+    if (typeof value.seconds === "number" && !isNaN(value.seconds)) {
+      const seconds = value.seconds;
+      const nanos = typeof value.nanoseconds === "number" && !isNaN(value.nanoseconds) ? value.nanoseconds : 0;
+      return seconds * 1000 + Math.floor(nanos / 1000000);
+    }
+
+    // 3. If it is a Javascript Date instance, use .getTime()
+    if (value instanceof Date) {
+      const time = value.getTime();
+      return isNaN(time) ? 0 : time;
+    }
+
+    // 4. If it has a .toDate function (e.g. some Firestore Timestamp wrappers)
+    if (typeof value.toDate === "function") {
+      const d = value.toDate();
+      if (d instanceof Date) {
+        const time = d.getTime();
+        return isNaN(time) ? 0 : time;
+      }
+    }
+
+    // 5. If it is an ISO string or any plain date string, parse it using new Date(value).getTime()
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (!trimmed) return 0;
+      const parsed = new Date(trimmed).getTime();
+      return isNaN(parsed) ? 0 : parsed;
+    }
+
+    // 6. If it is already a number
+    if (typeof value === "number" && !isNaN(value)) {
+      if (value > 0 && value < 10000000000) {
+        return value * 1000;
+      }
+      return value;
+    }
+  } catch (err) {
+    console.warn("Failed to extract safe timestamp millis:", err);
+  }
+
+  // Fallback to 0 if missing, null, or invalid
+  return 0;
+}
+
+/**
+ * Safely extracts epoch milliseconds for project sorting,
+ * checking createdAt, date, projectDate, and updatedAt in order.
+ */
+export function getProjectTimestampMillis(project: any): number {
+  if (!project) return 0;
+  if (project.createdAt) {
+    const t = getSafeTimestampMillis(project.createdAt);
+    if (t > 0) return t;
+  }
+  if (project.date) {
+    const t = getSafeTimestampMillis(project.date);
+    if (t > 0) return t;
+  }
+  if (project.projectDate) {
+    const t = getSafeTimestampMillis(project.projectDate);
+    if (t > 0) return t;
+  }
+  if (project.updatedAt) {
+    const t = getSafeTimestampMillis(project.updatedAt);
+    if (t > 0) return t;
+  }
+  return 0;
+}
+
+/**
+ * Safely formats any date-like value to the given pattern (defaults to 'yyyy-MM-dd').
+ */
+export function formatSafeDate(value: any, formatPattern: string = "yyyy-MM-dd", fallback: string = "-"): string {
+  if (value == null) return fallback;
+
+  if (typeof value === "string" && formatPattern === "yyyy-MM-dd" && /^\d{4}-\d{2}-\d{2}$/.test(value.trim())) {
+    return value.trim();
+  }
+
+  const millis = getSafeTimestampMillis(value);
+  if (millis <= 0) return fallback;
+
+  try {
+    const d = new Date(millis);
+    if (isNaN(d.getTime())) return fallback;
+    return format(d, formatPattern);
+  } catch {
+    return fallback;
+  }
+}
+
+/**
+ * Safely determines the display date string for a project row in tables.
+ */
+export function getProjectDisplayDate(project: any): string {
+  if (!project) return "-";
+  if (project.date && typeof project.date === "string" && project.date.trim()) {
+    return project.date.trim();
+  }
+  if (project.projectDate && typeof project.projectDate === "string" && project.projectDate.trim()) {
+    return project.projectDate.trim();
+  }
+  if (project.createdAt) {
+    const formatted = formatSafeDate(project.createdAt, "yyyy-MM-dd");
+    if (formatted !== "-") return formatted;
+  }
+  return "-";
+}
+
 

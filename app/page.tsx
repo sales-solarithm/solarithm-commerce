@@ -14,7 +14,7 @@ import { COLLECTIONS, CLIENT_STATUS, PROJECT_STATUS, CLIENT_FIELDS, PROJECT_FIEL
 import ThemeToggle from "@/components/ThemeToggle";
 import AppLauncherDropdown from "@/components/AppLauncherDropdown";
 import UpgradeProjectModal from "@/components/UpgradeProjectModal";
-import { generateClientInitials, toTitleCase, getStatusColor, toScopeKey, parsePackageScopes, getTodayDateString, filterAndDeduplicateDesigners, type ScopeItem } from "@/lib/utils";
+import { generateClientInitials, toTitleCase, getStatusColor, toScopeKey, parsePackageScopes, getTodayDateString, filterAndDeduplicateDesigners, getSafeTimestampMillis, getProjectTimestampMillis, formatSafeDate, getProjectDisplayDate, type ScopeItem } from "@/lib/utils";
 
 // --- SCHEMAS ---
 
@@ -713,10 +713,15 @@ function RegisterClientTab({ lockedEmail, currentUser }: { lockedEmail: string |
       where("salesPersonEmail", "==", lockedEmail)
     );
     const unsub = onSnapshot(q, (snapshot) => {
-      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      data.sort((a: any, b: any) => (b.createdAt?.toMillis() || 0) - (a.createdAt?.toMillis() || 0));
-      setClients(data);
-      setLoadingClients(false);
+      try {
+        const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        data.sort((a: any, b: any) => getSafeTimestampMillis(b.createdAt) - getSafeTimestampMillis(a.createdAt));
+        setClients(data);
+      } catch (err) {
+        console.error("Error processing clients in RegisterClientTab:", err);
+      } finally {
+        setLoadingClients(false);
+      }
     }, (err) => {
       console.error("Error fetching clients in RegisterClientTab:", err);
       setClients([]);
@@ -971,7 +976,7 @@ function RegisterClientTab({ lockedEmail, currentUser }: { lockedEmail: string |
                       </span>
                     </td>
                     <td className="py-3 px-4 text-gray-600 dark:text-gray-200">
-                      {client.createdAt ? format(client.createdAt.toDate(), 'MMM dd, yyyy') : '...'}
+                      {client.createdAt ? formatSafeDate(client.createdAt, 'MMM dd, yyyy', '...') : '...'}
                     </td>
                   </tr>
                 ))}
@@ -1903,10 +1908,17 @@ function MyProjectsTab({ lockedEmail, currentUser }: { lockedEmail: string | nul
         setLoading(false);
         return;
       }
-      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      data.sort((a: any, b: any) => (b.createdAt?.toMillis() || 0) - (a.createdAt?.toMillis() || 0));
-      setProjects(data);
-      setLoading(false);
+      try {
+        const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        data.sort((a: any, b: any) => getProjectTimestampMillis(b) - getProjectTimestampMillis(a));
+        setProjects(data);
+      } catch (sortErr) {
+        console.error("Error sorting projects in MyProjectsTab:", sortErr);
+        const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        setProjects(data);
+      } finally {
+        setLoading(false);
+      }
     }, (err) => {
       console.error("Failed to query central projects collection:", err);
       setProjects([]);
@@ -2097,7 +2109,7 @@ function MyProjectsTab({ lockedEmail, currentUser }: { lockedEmail: string | nul
       const clientName = (p.clientName || "").toLowerCase();
       const projectNumber = (p.projectNumber || p.srNumber || "").toLowerCase();
       const projectName = (p.projectName || "").toLowerCase();
-      const projectDate = (p.date || p.projectDate || "").toLowerCase();
+      const projectDate = (p.date || p.projectDate || getProjectDisplayDate(p) || "").toLowerCase();
       return clientName.includes(queryStr) || projectNumber.includes(queryStr) || projectName.includes(queryStr) || projectDate.includes(queryStr);
     });
   }, [projects, searchQuery]);
@@ -2209,7 +2221,7 @@ function MyProjectsTab({ lockedEmail, currentUser }: { lockedEmail: string | nul
                   <tr key={p.id} className="transition-colors hover:bg-gray-50 dark:hover:bg-[#2A2A2A]">
                     <td className="py-3 px-4 font-medium text-gray-800 dark:text-gray-200">{p.projectNumber || p.srNumber || '-'}</td>
                     <td className="py-3 px-4 text-gray-600 dark:text-gray-300 whitespace-nowrap text-xs sm:text-sm font-medium">
-                      {p.date || p.projectDate || (p.createdAt?.toDate ? format(p.createdAt.toDate(), 'yyyy-MM-dd') : '-')}
+                      {getProjectDisplayDate(p)}
                     </td>
                     <td className="py-3 px-4 text-gray-800 dark:text-gray-200 font-medium">
                       {toTitleCase(p.clientName)}
