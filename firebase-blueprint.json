@@ -108,7 +108,12 @@
       "description": "Clients registered by sales personnel",
       "fields": {
         "companyName": { "type": "string" },
-        "state": { "type": "string" },
+        "contactPerson": { "type": "string", "optional": true },
+        "email": { "type": "string", "optional": true },
+        "clientEmail": { "type": "string", "optional": true },
+        "phone": { "type": "string", "optional": true },
+        "contactNumber": { "type": "string", "optional": true },
+        "state": { "type": "string", "optional": true },
         "city": { "type": "string" },
         "address": { "type": "string" },
         "gstin": { "type": "string", "optional": true },

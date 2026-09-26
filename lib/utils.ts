@@ -296,6 +296,15 @@ export function getSafeTimestampMillis(value: any): number {
     if (typeof value === "string") {
       const trimmed = value.trim();
       if (!trimmed) return 0;
+      // Handle DD-MM-YYYY or DD/MM/YYYY formats
+      const ddmmyyyy = trimmed.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
+      if (ddmmyyyy) {
+        const d = parseInt(ddmmyyyy[1], 10);
+        const m = parseInt(ddmmyyyy[2], 10) - 1;
+        const y = parseInt(ddmmyyyy[3], 10);
+        const dt = new Date(y, m, d).getTime();
+        if (!isNaN(dt)) return dt;
+      }
       const parsed = new Date(trimmed).getTime();
       return isNaN(parsed) ? 0 : parsed;
     }
@@ -317,22 +326,30 @@ export function getSafeTimestampMillis(value: any): number {
 
 /**
  * Safely extracts epoch milliseconds for project sorting,
- * checking createdAt, date, projectDate, and updatedAt in order.
+ * strictly evaluating project dates in priority:
+ * 1. projectDate
+ * 2. date
+ * 3. createdAt
+ * 4. updatedAt
  */
 export function getProjectTimestampMillis(project: any): number {
   if (!project) return 0;
-  if (project.createdAt) {
-    const t = getSafeTimestampMillis(project.createdAt);
-    if (t > 0) return t;
-  }
-  if (project.date) {
-    const t = getSafeTimestampMillis(project.date);
-    if (t > 0) return t;
-  }
+  // Priority 1: projectDate
   if (project.projectDate) {
     const t = getSafeTimestampMillis(project.projectDate);
     if (t > 0) return t;
   }
+  // Priority 2: date
+  if (project.date) {
+    const t = getSafeTimestampMillis(project.date);
+    if (t > 0) return t;
+  }
+  // Priority 3: createdAt
+  if (project.createdAt) {
+    const t = getSafeTimestampMillis(project.createdAt);
+    if (t > 0) return t;
+  }
+  // Priority 4: updatedAt
   if (project.updatedAt) {
     const t = getSafeTimestampMillis(project.updatedAt);
     if (t > 0) return t;
@@ -363,18 +380,23 @@ export function formatSafeDate(value: any, formatPattern: string = "yyyy-MM-dd",
 }
 
 /**
- * Safely determines the display date string for a project row in tables.
+ * Safely determines the display date string for a project row in tables,
+ * prioritizing projectDate, date, createdAt, updatedAt.
  */
 export function getProjectDisplayDate(project: any): string {
   if (!project) return "-";
-  if (project.date && typeof project.date === "string" && project.date.trim()) {
-    return project.date.trim();
-  }
   if (project.projectDate && typeof project.projectDate === "string" && project.projectDate.trim()) {
     return project.projectDate.trim();
   }
+  if (project.date && typeof project.date === "string" && project.date.trim()) {
+    return project.date.trim();
+  }
   if (project.createdAt) {
     const formatted = formatSafeDate(project.createdAt, "yyyy-MM-dd");
+    if (formatted !== "-") return formatted;
+  }
+  if (project.updatedAt) {
+    const formatted = formatSafeDate(project.updatedAt, "yyyy-MM-dd");
     if (formatted !== "-") return formatted;
   }
   return "-";

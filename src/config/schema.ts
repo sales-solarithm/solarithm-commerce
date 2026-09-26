@@ -107,7 +107,8 @@ export const PROJECT_STATUS = {
 } as const;
 
 export const CLIENT_FIELDS = {
-  COMPANY_NAME: 'companyName', CONTACT_PERSON: 'contactPerson', EMAIL: 'email', PHONE: 'phone',
+  COMPANY_NAME: 'companyName', CONTACT_PERSON: 'contactPerson', EMAIL: 'email', CLIENT_EMAIL: 'clientEmail',
+  PHONE: 'phone', CONTACT_NUMBER: 'contactNumber',
   CITY: 'city', GSTIN: 'gstin', BILLING_ADDRESS: 'billingAddress', PRICING_CATEGORY: 'pricingCategory', SALES_PERSON_EMAIL: 'salesPersonEmail',
   PROPOSAL_NUMBER: 'proposalNumber', STATUS: 'status', CREATED_AT: 'createdAt'
 } as const;

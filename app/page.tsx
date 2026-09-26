@@ -9,10 +9,9 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
 import confetti from "canvas-confetti";
 import { format } from "date-fns";
-import { Loader2, LogOut, FileText, UserPlus, FolderOpen, ArrowLeft, Building2, CheckCircle2, Clock, AlertCircle, XCircle, X, Briefcase, Menu, BarChart3, CheckSquare, Clock3, RefreshCw, Users, Layers, Sparkles, Lock, Calendar } from "lucide-react";
+import { Loader2, LogOut, FileText, UserPlus, FolderOpen, ArrowLeft, Building2, CheckCircle2, Clock, AlertCircle, XCircle, X, Briefcase, Menu, BarChart3, CheckSquare, Clock3, RefreshCw, Users, Layers, Sparkles, Lock, Calendar, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, ArrowUpDown, ArrowUp, ArrowDown, Filter, FilterX, RotateCcw } from "lucide-react";
 import { COLLECTIONS, CLIENT_STATUS, PROJECT_STATUS, CLIENT_FIELDS, PROJECT_FIELDS, APPROVAL_TYPES, APPROVAL_STATUS } from "@/src/config/schema";
 import ThemeToggle from "@/components/ThemeToggle";
-import AppLauncherDropdown from "@/components/AppLauncherDropdown";
 import UpgradeProjectModal from "@/components/UpgradeProjectModal";
 import { generateClientInitials, toTitleCase, getStatusColor, toScopeKey, parsePackageScopes, getTodayDateString, filterAndDeduplicateDesigners, getSafeTimestampMillis, getProjectTimestampMillis, formatSafeDate, getProjectDisplayDate, type ScopeItem } from "@/lib/utils";
 
@@ -21,6 +20,8 @@ import { generateClientInitials, toTitleCase, getStatusColor, toScopeKey, parseP
 const clientSchema = z.object({
   companyName: z.string().min(1, "Company Name is required"),
   contactPerson: z.string().min(1, "Contact Person is required"),
+  email: z.string().min(1, "Client Email Address is required").email("Please enter a valid email address"),
+  phone: z.string().min(1, "Contact Number is required").regex(/^\d{10}$/, "Contact Number must be a valid 10-digit number"),
   city: z.string().min(1, "City is required"),
   gstin: z.string().optional(),
   billingAddress: z.string().optional(),
@@ -565,7 +566,6 @@ export default function ProjectEntryTool() {
         </div>
         <div className="flex items-center gap-2 sm:gap-4">
           <div className="text-sm text-gray-600 dark:text-gray-200 hidden lg:block">Logged in as: <span className="text-gray-900 dark:text-gray-100 font-medium">{userEmail}</span></div>
-          <AppLauncherDropdown currentUserRole={userRole || "sales"} />
           <ThemeToggle />
           <button
             onClick={handleLogout}
@@ -751,10 +751,16 @@ function RegisterClientTab({ lockedEmail, currentUser }: { lockedEmail: string |
     try {
       const selectedProposal = proposals.find(p => p.proposalNumber === data.proposalNumber);
       const pricingCategory = selectedProposal?.pricingCategory || 'T1';
+      const clientEmailClean = data.email.trim().toLowerCase();
+      const contactNumberClean = data.phone.trim();
 
       const payload = {
         [CLIENT_FIELDS.COMPANY_NAME]: toTitleCase(data.companyName),
         [CLIENT_FIELDS.CONTACT_PERSON]: toTitleCase(data.contactPerson),
+        [CLIENT_FIELDS.EMAIL]: clientEmailClean,
+        [CLIENT_FIELDS.CLIENT_EMAIL]: clientEmailClean,
+        [CLIENT_FIELDS.PHONE]: contactNumberClean,
+        [CLIENT_FIELDS.CONTACT_NUMBER]: contactNumberClean,
         [CLIENT_FIELDS.CITY]: toTitleCase(data.city),
         [CLIENT_FIELDS.GSTIN]: data.gstin ? data.gstin.toUpperCase().trim() : "",
         [CLIENT_FIELDS.BILLING_ADDRESS]: data.billingAddress ? data.billingAddress.trim() : "",
@@ -773,7 +779,12 @@ function RegisterClientTab({ lockedEmail, currentUser }: { lockedEmail: string |
           action: "CLIENT_REGISTERED",
           actor: lockedEmail,
           target: payload[CLIENT_FIELDS.COMPANY_NAME],
-          details: { clientId: clientRef.id, proposalNumber: data.proposalNumber },
+          details: { 
+            clientId: clientRef.id, 
+            proposalNumber: data.proposalNumber,
+            clientEmail: clientEmailClean,
+            contactNumber: contactNumberClean
+          },
           timestamp: serverTimestamp()
         });
       } catch (auditErr) {
@@ -856,14 +867,32 @@ function RegisterClientTab({ lockedEmail, currentUser }: { lockedEmail: string |
         <form onSubmit={handleSubmit(onSubmit)} className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6">
           <div className="space-y-1">
             <label className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-200">Company Name *</label>
-            <input {...register("companyName")} className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] outline-none" />
+            <input 
+              {...register("companyName")} 
+              placeholder="e.g. Acme Solar Solutions"
+              className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] outline-none" 
+            />
             {errors.companyName && <p className="text-sm text-rose-500">{errors.companyName.message as string}</p>}
           </div>
 
           <div className="space-y-1">
             <label className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-200">Contact Person *</label>
-            <input {...register("contactPerson")} className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] outline-none" />
+            <input 
+              {...register("contactPerson")} 
+              placeholder="e.g. Rajesh Sharma"
+              className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] outline-none" 
+            />
             {errors.contactPerson && <p className="text-sm text-rose-500">{errors.contactPerson.message as string}</p>}
+          </div>
+
+          <div className="space-y-1">
+            <label className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-200">City *</label>
+            <input 
+              {...register("city")} 
+              placeholder="e.g. Ahmedabad"
+              className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] outline-none" 
+            />
+            {errors.city && <p className="text-sm text-rose-500">{errors.city.message as string}</p>}
           </div>
           
           <div className="space-y-1">
@@ -878,9 +907,26 @@ function RegisterClientTab({ lockedEmail, currentUser }: { lockedEmail: string |
           </div>
 
           <div className="space-y-1">
-            <label className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-200">City *</label>
-            <input {...register("city")} className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] outline-none" />
-            {errors.city && <p className="text-sm text-rose-500">{errors.city.message as string}</p>}
+            <label className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-200">Client Email Address *</label>
+            <input 
+              type="email"
+              {...register("email")} 
+              placeholder="e.g. contact@acmesolar.com"
+              className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] outline-none" 
+            />
+            {errors.email && <p className="text-sm text-rose-500">{errors.email.message as string}</p>}
+          </div>
+
+          <div className="space-y-1">
+            <label className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-200">Contact Number *</label>
+            <input 
+              type="tel"
+              maxLength={10}
+              {...register("phone")} 
+              placeholder="e.g. 9876543210 (10 digits)"
+              className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] outline-none font-mono" 
+            />
+            {errors.phone && <p className="text-sm text-rose-500">{errors.phone.message as string}</p>}
           </div>
 
           <div className="space-y-1 md:col-span-2">
@@ -949,6 +995,7 @@ function RegisterClientTab({ lockedEmail, currentUser }: { lockedEmail: string |
               <thead className="bg-gray-50 dark:bg-transparent border-b border-gray-200 dark:border-[#333333]">
                 <tr className="text-gray-600 dark:text-gray-400 text-xs sm:text-sm uppercase font-semibold">
                   <th className="py-3 px-4">Company Name</th>
+                  <th className="py-3 px-4">Contact Info</th>
                   <th className="py-3 px-4">City</th>
                   <th className="py-3 px-4">GSTIN & Address</th>
                   <th className="py-3 px-4">Proposal</th>
@@ -959,7 +1006,16 @@ function RegisterClientTab({ lockedEmail, currentUser }: { lockedEmail: string |
               <tbody className="text-sm sm:text-base divide-y divide-gray-100 dark:divide-[#2A2A2A]">
                 {clients.map(client => (
                   <tr key={client.id} className="transition-colors hover:bg-gray-50 dark:hover:bg-[#2A2A2A]">
-                    <td className="py-3 px-4 font-medium text-gray-800 dark:text-gray-200">{toTitleCase(client.companyName)}</td>
+                    <td className="py-3 px-4 font-medium text-gray-800 dark:text-gray-200">
+                      <div>{toTitleCase(client.companyName)}</div>
+                      {client.contactPerson && (
+                        <div className="text-xs text-gray-500 dark:text-gray-400 font-normal">Attn: {toTitleCase(client.contactPerson)}</div>
+                      )}
+                    </td>
+                    <td className="py-3 px-4 text-xs sm:text-sm text-gray-700 dark:text-gray-200">
+                      <div className="font-medium text-gray-800 dark:text-gray-200">{client.email || client.clientEmail || '-'}</div>
+                      <div className="text-xs text-gray-500 dark:text-gray-400 font-mono mt-0.5">{client.phone || client.contactNumber || '-'}</div>
+                    </td>
                     <td className="py-3 px-4 text-gray-700 dark:text-gray-200">{toTitleCase(client.city)}</td>
                     <td className="py-3 px-4 text-gray-700 dark:text-gray-200">
                       <div className="font-mono text-xs">{client.gstin || <span className="text-gray-400 font-sans">No GSTIN</span>}</div>
@@ -1877,6 +1933,25 @@ function MyProjectsTab({ lockedEmail, currentUser }: { lockedEmail: string | nul
   const [scopesData, setScopesData] = useState<any[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
 
+  // Sorting state - default strictly descending by date (newest first)
+  const [sortField, setSortField] = useState<'date' | 'projectNumber' | 'clientName' | 'projectName' | 'scopeOfWork' | 'plantCapacity' | 'designer' | 'status'>('date');
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
+
+  // Column header filter states
+  const [showColumnFilters, setShowColumnFilters] = useState(true);
+  const [filterSrNo, setFilterSrNo] = useState("");
+  const [filterDate, setFilterDate] = useState("");
+  const [filterClient, setFilterClient] = useState("");
+  const [filterProjectName, setFilterProjectName] = useState("");
+  const [filterScope, setFilterScope] = useState("");
+  const [filterCapacity, setFilterCapacity] = useState("");
+  const [filterDesigner, setFilterDesigner] = useState("");
+  const [filterStatus, setFilterStatus] = useState("");
+
+  // Pagination state (strictly 15 items per page)
+  const PAGE_SIZE = 15;
+  const [currentPage, setCurrentPage] = useState<number>(1);
+
   const showToast = (msg: string) => {
     setToastMsg(msg);
     setTimeout(() => {
@@ -2102,17 +2177,290 @@ function MyProjectsTab({ lockedEmail, currentUser }: { lockedEmail: string | nul
     }
   };
 
-  const filteredProjects = useMemo(() => {
-    if (!searchQuery.trim()) return projects;
-    const queryStr = searchQuery.toLowerCase().trim();
-    return projects.filter(p => {
-      const clientName = (p.clientName || "").toLowerCase();
-      const projectNumber = (p.projectNumber || p.srNumber || "").toLowerCase();
-      const projectName = (p.projectName || "").toLowerCase();
-      const projectDate = (p.date || p.projectDate || getProjectDisplayDate(p) || "").toLowerCase();
-      return clientName.includes(queryStr) || projectNumber.includes(queryStr) || projectName.includes(queryStr) || projectDate.includes(queryStr);
+  const handleSort = (field: 'date' | 'projectNumber' | 'clientName' | 'projectName' | 'scopeOfWork' | 'plantCapacity' | 'designer' | 'status') => {
+    if (sortField === field) {
+      setSortDirection(prev => (prev === 'desc' ? 'asc' : 'desc'));
+    } else {
+      setSortField(field);
+      setSortDirection(field === 'date' ? 'desc' : 'asc');
+    }
+  };
+
+  const activeFiltersCount = useMemo(() => {
+    let count = 0;
+    if (filterSrNo.trim()) count++;
+    if (filterDate.trim()) count++;
+    if (filterClient.trim()) count++;
+    if (filterProjectName.trim()) count++;
+    if (filterScope.trim()) count++;
+    if (filterCapacity.trim()) count++;
+    if (filterDesigner.trim()) count++;
+    if (filterStatus.trim()) count++;
+    return count;
+  }, [filterSrNo, filterDate, filterClient, filterProjectName, filterScope, filterCapacity, filterDesigner, filterStatus]);
+
+  const clearAllFilters = () => {
+    setSearchQuery("");
+    setFilterSrNo("");
+    setFilterDate("");
+    setFilterClient("");
+    setFilterProjectName("");
+    setFilterScope("");
+    setFilterCapacity("");
+    setFilterDesigner("");
+    setFilterStatus("");
+    setSortField('date');
+    setSortDirection('desc');
+    setCurrentPage(1);
+  };
+
+  const uniqueClients = useMemo(() => {
+    const set = new Set<string>();
+    projects.forEach(p => {
+      if (p.clientName) set.add(p.clientName.trim());
     });
-  }, [projects, searchQuery]);
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [projects]);
+
+  const uniqueScopes = useMemo(() => {
+    const set = new Set<string>();
+    projects.forEach(p => {
+      if (p.scopeOfWork) set.add(p.scopeOfWork.trim());
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [projects]);
+
+  const uniqueStatuses = useMemo(() => {
+    const set = new Set<string>();
+    projects.forEach(p => {
+      if (p.status) set.add(p.status.trim());
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [projects]);
+
+  const handleSearchChange = (val: string) => {
+    setSearchQuery(val);
+    setCurrentPage(1);
+  };
+
+  const handleFilterSrNoChange = (val: string) => {
+    setFilterSrNo(val);
+    setCurrentPage(1);
+  };
+
+  const handleFilterDateChange = (val: string) => {
+    setFilterDate(val);
+    setCurrentPage(1);
+  };
+
+  const handleFilterClientChange = (val: string) => {
+    setFilterClient(val);
+    setCurrentPage(1);
+  };
+
+  const handleFilterProjectNameChange = (val: string) => {
+    setFilterProjectName(val);
+    setCurrentPage(1);
+  };
+
+  const handleFilterScopeChange = (val: string) => {
+    setFilterScope(val);
+    setCurrentPage(1);
+  };
+
+  const handleFilterCapacityChange = (val: string) => {
+    setFilterCapacity(val);
+    setCurrentPage(1);
+  };
+
+  const handleFilterDesignerChange = (val: string) => {
+    setFilterDesigner(val);
+    setCurrentPage(1);
+  };
+
+  const handleFilterStatusChange = (val: string) => {
+    setFilterStatus(val);
+    setCurrentPage(1);
+  };
+
+  const filteredProjects = useMemo(() => {
+    let result = [...projects];
+
+    // Global Search Filter
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase().trim();
+      result = result.filter(p => {
+        const clientName = (p.clientName || "").toLowerCase();
+        const projectNumber = (p.projectNumber || p.srNumber || "").toLowerCase();
+        const projectName = (p.projectName || p[PROJECT_FIELDS.PROJECT_NAME] || "").toLowerCase();
+        const projectDate = (p.date || p.projectDate || getProjectDisplayDate(p) || "").toLowerCase();
+        const scope = (p.scopeOfWork || "").toLowerCase();
+        const designer = (p.designerEmail || p.designerName || "").toLowerCase();
+        const status = (p.status || "").toLowerCase();
+        return (
+          clientName.includes(q) ||
+          projectNumber.includes(q) ||
+          projectName.includes(q) ||
+          projectDate.includes(q) ||
+          scope.includes(q) ||
+          designer.includes(q) ||
+          status.includes(q)
+        );
+      });
+    }
+
+    // Column Filters
+    if (filterSrNo.trim()) {
+      const q = filterSrNo.toLowerCase().trim();
+      result = result.filter(p => (p.projectNumber || p.srNumber || "").toLowerCase().includes(q));
+    }
+
+    if (filterDate.trim()) {
+      const q = filterDate.toLowerCase().trim();
+      result = result.filter(p => {
+        const d = (p.date || p.projectDate || getProjectDisplayDate(p) || "").toLowerCase();
+        return d.includes(q);
+      });
+    }
+
+    if (filterClient.trim()) {
+      const q = filterClient.toLowerCase().trim();
+      result = result.filter(p => (p.clientName || "").toLowerCase().trim() === q);
+    }
+
+    if (filterProjectName.trim()) {
+      const q = filterProjectName.toLowerCase().trim();
+      result = result.filter(p => (p.projectName || p[PROJECT_FIELDS.PROJECT_NAME] || "").toLowerCase().includes(q));
+    }
+
+    if (filterScope.trim()) {
+      const q = filterScope.toLowerCase().trim();
+      result = result.filter(p => (p.scopeOfWork || "").toLowerCase().trim() === q);
+    }
+
+    if (filterCapacity.trim()) {
+      const q = filterCapacity.toLowerCase().trim();
+      result = result.filter(p => {
+        const cap = p.plantCapacity ? `${p.plantCapacity} ${p.capacityUnit || 'KW'}`.toLowerCase() : "";
+        return cap.includes(q) || String(p.plantCapacity || "").includes(q);
+      });
+    }
+
+    if (filterDesigner.trim()) {
+      const q = filterDesigner.toLowerCase().trim();
+      result = result.filter(p => {
+        if (q === "unassigned") {
+          return !p.designerEmail && (!p.assignedScopes || Object.keys(p.assignedScopes).length === 0);
+        }
+        const desEmail = (p.designerEmail || "").toLowerCase();
+        const desName = (p.designerName || "").toLowerCase();
+        const scopesMatch = p.assignedScopes && Object.values(p.assignedScopes).some((val: any) => String(val).toLowerCase().includes(q));
+        return desEmail.includes(q) || desName.includes(q) || scopesMatch;
+      });
+    }
+
+    if (filterStatus.trim()) {
+      const q = filterStatus.toLowerCase().trim();
+      result = result.filter(p => (p.status || "").toLowerCase().trim() === q);
+    }
+
+    // Strict Sorting Logic - default newest first
+    result.sort((a: any, b: any) => {
+      if (sortField === 'date') {
+        const aT = getProjectTimestampMillis(a);
+        const bT = getProjectTimestampMillis(b);
+        return sortDirection === 'desc' ? bT - aT : aT - bT;
+      }
+      if (sortField === 'projectNumber') {
+        const aNum = (a.projectNumber || a.srNumber || '').toString();
+        const bNum = (b.projectNumber || b.srNumber || '').toString();
+        const cmp = aNum.localeCompare(bNum, undefined, { numeric: true, sensitivity: 'base' });
+        return sortDirection === 'desc' ? -cmp : cmp;
+      }
+      if (sortField === 'clientName') {
+        const aVal = (a.clientName || '').toString();
+        const bVal = (b.clientName || '').toString();
+        const cmp = aVal.localeCompare(bVal);
+        return sortDirection === 'desc' ? -cmp : cmp;
+      }
+      if (sortField === 'projectName') {
+        const aVal = (a.projectName || a[PROJECT_FIELDS.PROJECT_NAME] || '').toString();
+        const bVal = (b.projectName || b[PROJECT_FIELDS.PROJECT_NAME] || '').toString();
+        const cmp = aVal.localeCompare(bVal);
+        return sortDirection === 'desc' ? -cmp : cmp;
+      }
+      if (sortField === 'scopeOfWork') {
+        const aVal = (a.scopeOfWork || '').toString();
+        const bVal = (b.scopeOfWork || '').toString();
+        const cmp = aVal.localeCompare(bVal);
+        return sortDirection === 'desc' ? -cmp : cmp;
+      }
+      if (sortField === 'plantCapacity') {
+        const aVal = Number(a.plantCapacity) || 0;
+        const bVal = Number(b.plantCapacity) || 0;
+        return sortDirection === 'desc' ? bVal - aVal : aVal - bVal;
+      }
+      if (sortField === 'designer') {
+        const getDesignerStr = (pObj: any) => {
+          if (pObj.designerName) return pObj.designerName;
+          if (pObj.designerEmail) return pObj.designerEmail;
+          if (pObj.assignedScopes && Object.keys(pObj.assignedScopes).length > 0) {
+            return Object.values(pObj.assignedScopes).join(', ');
+          }
+          return '';
+        };
+        const aVal = getDesignerStr(a);
+        const bVal = getDesignerStr(b);
+        const cmp = aVal.localeCompare(bVal);
+        return sortDirection === 'desc' ? -cmp : cmp;
+      }
+      if (sortField === 'status') {
+        const aVal = (a.status || '').toString();
+        const bVal = (b.status || '').toString();
+        const cmp = aVal.localeCompare(bVal);
+        return sortDirection === 'desc' ? -cmp : cmp;
+      }
+      return 0;
+    });
+
+    return result;
+  }, [
+    projects,
+    searchQuery,
+    filterSrNo,
+    filterDate,
+    filterClient,
+    filterProjectName,
+    filterScope,
+    filterCapacity,
+    filterDesigner,
+    filterStatus,
+    sortField,
+    sortDirection
+  ]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredProjects.length / PAGE_SIZE));
+  const safeCurrentPage = Math.min(Math.max(1, currentPage), totalPages);
+
+  const paginatedProjects = useMemo(() => {
+    const startIndex = (safeCurrentPage - 1) * PAGE_SIZE;
+    return filteredProjects.slice(startIndex, startIndex + PAGE_SIZE);
+  }, [filteredProjects, safeCurrentPage]);
+
+  const pageNumbers = useMemo(() => {
+    if (totalPages <= 7) {
+      return Array.from({ length: totalPages }, (_, i) => i + 1);
+    }
+    const pages: (number | string)[] = [];
+    if (safeCurrentPage <= 4) {
+      pages.push(1, 2, 3, 4, 5, '...', totalPages);
+    } else if (safeCurrentPage >= totalPages - 3) {
+      pages.push(1, '...', totalPages - 4, totalPages - 3, totalPages - 2, totalPages - 1, totalPages);
+    } else {
+      pages.push(1, '...', safeCurrentPage - 1, safeCurrentPage, safeCurrentPage + 1, '...', totalPages);
+    }
+    return pages;
+  }, [totalPages, safeCurrentPage]);
 
   const completedCount = useMemo(() => projects.filter(p => p.status === 'completed' || p.status === 'approved').length, [projects]);
   const inProgressCount = useMemo(() => projects.filter(p => p.status === 'in_progress' || p.status === 'assigned').length, [projects]);
@@ -2168,23 +2516,120 @@ function MyProjectsTab({ lockedEmail, currentUser }: { lockedEmail: string | nul
           </div>
         </div>
 
-        {/* Search Filter Bar */}
+        {/* Search & Filter Bar */}
         {projects.length > 0 && (
-          <div className="mb-6">
-            <div className="relative max-w-md w-full">
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search by Client, Project No., or Project Name..."
-                className="w-full pl-10 pr-4 py-2 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] focus:border-transparent outline-none text-sm sm:text-base transition-all shadow-sm"
-              />
-              <div className="absolute left-3 top-2.5 text-gray-400">
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-4.5 w-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                </svg>
+          <div className="mb-6 space-y-3">
+            <div className="flex flex-col md:flex-row justify-between items-stretch md:items-center gap-3">
+              <div className="relative max-w-md w-full">
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => handleSearchChange(e.target.value)}
+                  placeholder="Search by Client, Project No., or Project Name..."
+                  className="w-full pl-10 pr-9 py-2 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] focus:border-transparent outline-none text-sm sm:text-base transition-all shadow-sm"
+                />
+                <div className="absolute left-3 top-2.5 text-gray-400">
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4.5 w-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                  </svg>
+                </div>
+                {searchQuery && (
+                  <button
+                    onClick={() => handleSearchChange("")}
+                    className="absolute right-3 top-2.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 cursor-pointer"
+                    title="Clear search"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2 self-start md:self-auto">
+                <button
+                  onClick={() => setShowColumnFilters(prev => !prev)}
+                  className={`px-3 py-2 rounded-lg text-xs sm:text-sm font-medium border flex items-center gap-2 transition-colors cursor-pointer ${
+                    showColumnFilters || activeFiltersCount > 0
+                      ? "bg-amber-500/10 border-amber-500/40 text-amber-700 dark:text-[#D4AF37]"
+                      : "bg-white dark:bg-[#1E1E1E] border-gray-300 dark:border-[#2A2A2A] text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-[#2A2A2A]"
+                  }`}
+                  title="Toggle column-header filters"
+                >
+                  <Filter className="w-4 h-4" />
+                  <span>Column Filters</span>
+                  {activeFiltersCount > 0 && (
+                    <span className="w-5 h-5 rounded-full bg-[#D4AF37] text-black font-bold text-[10px] flex items-center justify-center">
+                      {activeFiltersCount}
+                    </span>
+                  )}
+                </button>
+
+                {(activeFiltersCount > 0 || searchQuery.trim() !== '') && (
+                  <button
+                    onClick={clearAllFilters}
+                    className="px-3 py-2 rounded-lg text-xs sm:text-sm font-medium border border-rose-300 dark:border-rose-900/50 bg-rose-50 dark:bg-rose-950/20 text-rose-600 dark:text-rose-400 hover:bg-rose-100 dark:hover:bg-rose-900/30 flex items-center gap-1.5 transition-colors cursor-pointer"
+                    title="Reset all filters, search query, and sorting"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    <span>Reset Filters</span>
+                  </button>
+                )}
               </div>
             </div>
+
+            {/* Active filter badges */}
+            {activeFiltersCount > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5 pt-1 text-xs">
+                <span className="text-gray-500 dark:text-gray-400 font-medium mr-1">Active filters:</span>
+                {filterSrNo && (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950/50 text-amber-800 dark:text-amber-300 border border-amber-300 dark:border-amber-800/50">
+                    No: {filterSrNo}
+                    <button onClick={() => handleFilterSrNoChange("")} className="hover:text-amber-950 dark:hover:text-white cursor-pointer"><X className="w-3 h-3" /></button>
+                  </span>
+                )}
+                {filterDate && (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950/50 text-amber-800 dark:text-amber-300 border border-amber-300 dark:border-amber-800/50">
+                    Date: {filterDate}
+                    <button onClick={() => handleFilterDateChange("")} className="hover:text-amber-950 dark:hover:text-white cursor-pointer"><X className="w-3 h-3" /></button>
+                  </span>
+                )}
+                {filterClient && (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950/50 text-amber-800 dark:text-amber-300 border border-amber-300 dark:border-amber-800/50">
+                    Client: {filterClient}
+                    <button onClick={() => handleFilterClientChange("")} className="hover:text-amber-950 dark:hover:text-white cursor-pointer"><X className="w-3 h-3" /></button>
+                  </span>
+                )}
+                {filterProjectName && (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950/50 text-amber-800 dark:text-amber-300 border border-amber-300 dark:border-amber-800/50">
+                    Project: {filterProjectName}
+                    <button onClick={() => handleFilterProjectNameChange("")} className="hover:text-amber-950 dark:hover:text-white cursor-pointer"><X className="w-3 h-3" /></button>
+                  </span>
+                )}
+                {filterScope && (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950/50 text-amber-800 dark:text-amber-300 border border-amber-300 dark:border-amber-800/50">
+                    Scope: {filterScope}
+                    <button onClick={() => handleFilterScopeChange("")} className="hover:text-amber-950 dark:hover:text-white cursor-pointer"><X className="w-3 h-3" /></button>
+                  </span>
+                )}
+                {filterCapacity && (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950/50 text-amber-800 dark:text-amber-300 border border-amber-300 dark:border-amber-800/50">
+                    Cap: {filterCapacity}
+                    <button onClick={() => handleFilterCapacityChange("")} className="hover:text-amber-950 dark:hover:text-white cursor-pointer"><X className="w-3 h-3" /></button>
+                  </span>
+                )}
+                {filterDesigner && (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950/50 text-amber-800 dark:text-amber-300 border border-amber-300 dark:border-amber-800/50">
+                    Designer: {filterDesigner}
+                    <button onClick={() => handleFilterDesignerChange("")} className="hover:text-amber-950 dark:hover:text-white cursor-pointer"><X className="w-3 h-3" /></button>
+                  </span>
+                )}
+                {filterStatus && (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950/50 text-amber-800 dark:text-amber-300 border border-amber-300 dark:border-amber-800/50">
+                    Status: {toTitleCase(filterStatus.replace(/_/g, ' '))}
+                    <button onClick={() => handleFilterStatusChange("")} className="hover:text-amber-950 dark:hover:text-white cursor-pointer"><X className="w-3 h-3" /></button>
+                  </span>
+                )}
+              </div>
+            )}
           </div>
         )}
 
@@ -2198,128 +2643,395 @@ function MyProjectsTab({ lockedEmail, currentUser }: { lockedEmail: string | nul
         ) : filteredProjects.length === 0 ? (
           <div className="text-center py-12 text-gray-500 dark:text-gray-400 border border-dashed border-gray-300 dark:border-[#333333] rounded-xl">
             <FolderOpen className="w-12 h-12 mx-auto text-gray-400 dark:text-[#333333] mb-3" />
-            <p>No projects found matching &quot;{searchQuery}&quot;</p>
+            <p>No projects found matching the specified filters or search &quot;{searchQuery}&quot;</p>
+            <button
+              onClick={clearAllFilters}
+              className="mt-3 px-3 py-1.5 text-xs font-semibold text-amber-700 dark:text-[#D4AF37] hover:underline"
+            >
+              Clear All Filters
+            </button>
           </div>
         ) : (
-          <div className="w-full overflow-x-auto rounded-lg border border-gray-200 dark:border-[#333333] bg-white dark:bg-[#1E1E1E]">
-            <table className="w-full text-left border-collapse whitespace-nowrap min-w-[760px]">
-              <thead className="bg-gray-50 dark:bg-transparent border-b border-gray-200 dark:border-[#333333]">
-                <tr className="text-gray-600 dark:text-gray-400 text-xs sm:text-sm uppercase font-semibold">
-                  <th className="py-3 px-4">SR. No</th>
-                  <th className="py-3 px-4">Date</th>
-                  <th className="py-3 px-4">Client Name</th>
-                  <th className="py-3 px-4">Project Name</th>
-                  <th className="py-3 px-4">Scope</th>
-                  <th className="py-3 px-4">Capacity</th>
-                  <th className="py-3 px-4">Designer</th>
-                  <th className="py-3 px-4">Status</th>
-                  <th className="py-3 px-4 text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="text-sm sm:text-base divide-y divide-gray-100 dark:divide-[#2A2A2A]">
-                {filteredProjects.map(p => (
-                  <tr key={p.id} className="transition-colors hover:bg-gray-50 dark:hover:bg-[#2A2A2A]">
-                    <td className="py-3 px-4 font-medium text-gray-800 dark:text-gray-200">{p.projectNumber || p.srNumber || '-'}</td>
-                    <td className="py-3 px-4 text-gray-600 dark:text-gray-300 whitespace-nowrap text-xs sm:text-sm font-medium">
-                      {getProjectDisplayDate(p)}
-                    </td>
-                    <td className="py-3 px-4 text-gray-800 dark:text-gray-200 font-medium">
-                      {toTitleCase(p.clientName)}
-                    </td>
-                    <td className="py-3 px-4 text-gray-800 dark:text-gray-200 font-medium">
-                      {toTitleCase(p[PROJECT_FIELDS.PROJECT_NAME] || '-')}
-                    </td>
-                    <td className="py-3 px-4 text-gray-700 dark:text-gray-200">
-                      {toTitleCase(p.scopeOfWork)}
-                      {p.subService && <span className="block text-xs sm:text-sm text-gray-500 dark:text-gray-400">{toTitleCase(p.subService)}</span>}
-                    </td>
-                    <td className="py-3 px-4 text-gray-700 dark:text-gray-200">
-                      {p.plantCapacity ? `${p.plantCapacity} ${p.capacityUnit || 'KW'}` : <span className="text-gray-400 italic">TBD</span>}
-                    </td>
-                    <td className="py-3 px-4">
-                      {p.assignedScopes && Object.keys(p.assignedScopes).length > 1 ? (
-                        <div className="flex flex-col gap-1.5 py-1 min-w-[220px]">
-                          <div className="flex items-center gap-1.5 text-[11px] font-bold text-amber-600 dark:text-[#D4AF37] uppercase tracking-wider">
-                            <Layers className="w-3.5 h-3.5" />
-                            <span>Split Scope ({Object.keys(p.assignedScopes).length})</span>
-                          </div>
-                          <div className="space-y-1">
-                            {Object.entries(p.assignedScopes).map(([sKey, dEmail]) => {
-                              const dEmailStr = String(dEmail || "");
-                              const designerObj = designers.find(d => d.email === dEmailStr);
-                              return (
-                                <div key={sKey} className="flex items-center justify-between gap-1.5 bg-gray-50 dark:bg-[#252525] px-2 py-1 rounded border border-gray-200 dark:border-[#333333] text-xs">
-                                  <span className="font-semibold text-gray-700 dark:text-gray-300 font-mono text-[11px] truncate max-w-[75px]" title={sKey}>
-                                    {sKey}:
-                                  </span>
-                                  <select
-                                    value={dEmailStr}
-                                    onChange={(e) => handleReassignScopeDesigner(p.id, sKey, e.target.value)}
-                                    className="bg-transparent text-gray-900 dark:text-gray-100 text-xs font-medium focus:outline-none cursor-pointer max-w-[135px] truncate"
-                                    title={`Assigned: ${designerObj ? designerObj.name : dEmailStr}`}
-                                  >
-                                    <option value="" className="bg-white dark:bg-[#1E1E1E]">Unassigned</option>
-                                    {designers.map(d => (
-                                      <option key={d.id} value={d.email} className="bg-white dark:bg-[#1E1E1E]">
-                                        {d.name}
-                                      </option>
-                                    ))}
-                                  </select>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      ) : (
+          <div className="space-y-4">
+            <div className="w-full overflow-x-auto rounded-lg border border-gray-200 dark:border-[#333333] bg-white dark:bg-[#1E1E1E]">
+              <table className="w-full text-left border-collapse whitespace-nowrap min-w-[760px]">
+                <thead className="bg-gray-50 dark:bg-[#252525] border-b border-gray-200 dark:border-[#333333]">
+                  {/* Column Header Titles with Sorting */}
+                  <tr className="text-gray-600 dark:text-gray-400 text-xs sm:text-sm uppercase font-semibold">
+                    <th className="py-3 px-4">
+                      <button
+                        onClick={() => handleSort('projectNumber')}
+                        className="flex items-center gap-1.5 hover:text-amber-600 dark:hover:text-[#D4AF37] transition-colors focus:outline-none group cursor-pointer"
+                        title="Sort by SR / Project Number"
+                      >
+                        <span>SR. No</span>
+                        <span className={sortField === 'projectNumber' ? 'text-amber-600 dark:text-[#D4AF37]' : 'text-gray-400 opacity-40 group-hover:opacity-100'}>
+                          {sortField === 'projectNumber' ? (sortDirection === 'desc' ? <ArrowDown className="w-3.5 h-3.5" /> : <ArrowUp className="w-3.5 h-3.5" />) : <ArrowUpDown className="w-3.5 h-3.5" />}
+                        </span>
+                      </button>
+                    </th>
+                    <th className="py-3 px-4">
+                      <button
+                        onClick={() => handleSort('date')}
+                        className="flex items-center gap-1.5 hover:text-amber-600 dark:hover:text-[#D4AF37] transition-colors focus:outline-none group cursor-pointer"
+                        title="Sort by Date (Default Newest First)"
+                      >
+                        <span>Date</span>
+                        <span className={sortField === 'date' ? 'text-amber-600 dark:text-[#D4AF37]' : 'text-gray-400 opacity-40 group-hover:opacity-100'}>
+                          {sortField === 'date' ? (sortDirection === 'desc' ? <ArrowDown className="w-3.5 h-3.5" /> : <ArrowUp className="w-3.5 h-3.5" />) : <ArrowUpDown className="w-3.5 h-3.5" />}
+                        </span>
+                      </button>
+                    </th>
+                    <th className="py-3 px-4">
+                      <button
+                        onClick={() => handleSort('clientName')}
+                        className="flex items-center gap-1.5 hover:text-amber-600 dark:hover:text-[#D4AF37] transition-colors focus:outline-none group cursor-pointer"
+                        title="Sort by Client Name"
+                      >
+                        <span>Client Name</span>
+                        <span className={sortField === 'clientName' ? 'text-amber-600 dark:text-[#D4AF37]' : 'text-gray-400 opacity-40 group-hover:opacity-100'}>
+                          {sortField === 'clientName' ? (sortDirection === 'desc' ? <ArrowDown className="w-3.5 h-3.5" /> : <ArrowUp className="w-3.5 h-3.5" />) : <ArrowUpDown className="w-3.5 h-3.5" />}
+                        </span>
+                      </button>
+                    </th>
+                    <th className="py-3 px-4">
+                      <button
+                        onClick={() => handleSort('projectName')}
+                        className="flex items-center gap-1.5 hover:text-amber-600 dark:hover:text-[#D4AF37] transition-colors focus:outline-none group cursor-pointer"
+                        title="Sort by Project Name"
+                      >
+                        <span>Project Name</span>
+                        <span className={sortField === 'projectName' ? 'text-amber-600 dark:text-[#D4AF37]' : 'text-gray-400 opacity-40 group-hover:opacity-100'}>
+                          {sortField === 'projectName' ? (sortDirection === 'desc' ? <ArrowDown className="w-3.5 h-3.5" /> : <ArrowUp className="w-3.5 h-3.5" />) : <ArrowUpDown className="w-3.5 h-3.5" />}
+                        </span>
+                      </button>
+                    </th>
+                    <th className="py-3 px-4">
+                      <button
+                        onClick={() => handleSort('scopeOfWork')}
+                        className="flex items-center gap-1.5 hover:text-amber-600 dark:hover:text-[#D4AF37] transition-colors focus:outline-none group cursor-pointer"
+                        title="Sort by Scope of Work"
+                      >
+                        <span>Scope</span>
+                        <span className={sortField === 'scopeOfWork' ? 'text-amber-600 dark:text-[#D4AF37]' : 'text-gray-400 opacity-40 group-hover:opacity-100'}>
+                          {sortField === 'scopeOfWork' ? (sortDirection === 'desc' ? <ArrowDown className="w-3.5 h-3.5" /> : <ArrowUp className="w-3.5 h-3.5" />) : <ArrowUpDown className="w-3.5 h-3.5" />}
+                        </span>
+                      </button>
+                    </th>
+                    <th className="py-3 px-4">
+                      <button
+                        onClick={() => handleSort('plantCapacity')}
+                        className="flex items-center gap-1.5 hover:text-amber-600 dark:hover:text-[#D4AF37] transition-colors focus:outline-none group cursor-pointer"
+                        title="Sort by Plant Capacity"
+                      >
+                        <span>Capacity</span>
+                        <span className={sortField === 'plantCapacity' ? 'text-amber-600 dark:text-[#D4AF37]' : 'text-gray-400 opacity-40 group-hover:opacity-100'}>
+                          {sortField === 'plantCapacity' ? (sortDirection === 'desc' ? <ArrowDown className="w-3.5 h-3.5" /> : <ArrowUp className="w-3.5 h-3.5" />) : <ArrowUpDown className="w-3.5 h-3.5" />}
+                        </span>
+                      </button>
+                    </th>
+                    <th className="py-3 px-4">
+                      <button
+                        onClick={() => handleSort('designer')}
+                        className="flex items-center gap-1.5 hover:text-amber-600 dark:hover:text-[#D4AF37] transition-colors focus:outline-none group cursor-pointer"
+                        title="Sort by Assigned Designer"
+                      >
+                        <span>Designer</span>
+                        <span className={sortField === 'designer' ? 'text-amber-600 dark:text-[#D4AF37]' : 'text-gray-400 opacity-40 group-hover:opacity-100'}>
+                          {sortField === 'designer' ? (sortDirection === 'desc' ? <ArrowDown className="w-3.5 h-3.5" /> : <ArrowUp className="w-3.5 h-3.5" />) : <ArrowUpDown className="w-3.5 h-3.5" />}
+                        </span>
+                      </button>
+                    </th>
+                    <th className="py-3 px-4">
+                      <button
+                        onClick={() => handleSort('status')}
+                        className="flex items-center gap-1.5 hover:text-amber-600 dark:hover:text-[#D4AF37] transition-colors focus:outline-none group cursor-pointer"
+                        title="Sort by Status"
+                      >
+                        <span>Status</span>
+                        <span className={sortField === 'status' ? 'text-amber-600 dark:text-[#D4AF37]' : 'text-gray-400 opacity-40 group-hover:opacity-100'}>
+                          {sortField === 'status' ? (sortDirection === 'desc' ? <ArrowDown className="w-3.5 h-3.5" /> : <ArrowUp className="w-3.5 h-3.5" />) : <ArrowUpDown className="w-3.5 h-3.5" />}
+                        </span>
+                      </button>
+                    </th>
+                    <th className="py-3 px-4 text-right">Actions</th>
+                  </tr>
+
+                  {/* Column Filters Row */}
+                  {showColumnFilters && (
+                    <tr className="bg-gray-100/80 dark:bg-[#202020] border-t border-b border-gray-200 dark:border-[#333333]">
+                      <th className="p-2">
+                        <input
+                          type="text"
+                          value={filterSrNo}
+                          onChange={(e) => handleFilterSrNoChange(e.target.value)}
+                          placeholder="Filter No..."
+                          className="w-full text-xs px-2 py-1 rounded border border-gray-300 dark:border-[#333333] bg-white dark:bg-[#1E1E1E] text-gray-900 dark:text-white font-normal focus:outline-none focus:ring-1 focus:ring-[#D4AF37]"
+                        />
+                      </th>
+                      <th className="p-2">
+                        <input
+                          type="text"
+                          value={filterDate}
+                          onChange={(e) => handleFilterDateChange(e.target.value)}
+                          placeholder="Filter Date..."
+                          className="w-full text-xs px-2 py-1 rounded border border-gray-300 dark:border-[#333333] bg-white dark:bg-[#1E1E1E] text-gray-900 dark:text-white font-normal focus:outline-none focus:ring-1 focus:ring-[#D4AF37]"
+                        />
+                      </th>
+                      <th className="p-2">
                         <select
-                          value={p.designerEmail || (p.assignedScopes ? Object.values(p.assignedScopes)[0] : "") || ""}
-                          onChange={(e) => handleReassignDesigner(p.id, e.target.value)}
-                          className="bg-white dark:bg-[#1E1E1E] border border-gray-300 dark:border-[#2A2A2A] rounded-lg px-2.5 py-1 text-xs sm:text-sm font-semibold text-gray-800 dark:text-gray-200 focus:outline-none focus:ring-1 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] cursor-pointer max-w-[200px] hover:border-[#D4AF37]/50 transition-colors"
+                          value={filterClient}
+                          onChange={(e) => handleFilterClientChange(e.target.value)}
+                          className="w-full text-xs px-2 py-1 rounded border border-gray-300 dark:border-[#333333] bg-white dark:bg-[#1E1E1E] text-gray-900 dark:text-white font-normal focus:outline-none focus:ring-1 focus:ring-[#D4AF37] max-w-[140px]"
                         >
-                          <option value="" className="bg-white dark:bg-[#1E1E1E] text-gray-900 dark:text-white">Unassigned</option>
-                          {designers.map(d => (
-                            <option key={d.id} value={d.email} className="bg-white dark:bg-[#1E1E1E] text-gray-900 dark:text-white">
-                              {toTitleCase(d.name)}
-                            </option>
+                          <option value="">All Clients</option>
+                          {uniqueClients.map(c => (
+                            <option key={c} value={c}>{toTitleCase(c)}</option>
                           ))}
                         </select>
-                      )}
-                    </td>
-                    <td className="py-3 px-4">
-                      <span className={`inline-block px-2 py-1 rounded text-xs font-medium border text-center ${getStatusColor(p.status)}`}>
-                        {toTitleCase(p.status.replace(/_/g, ' '))}
-                      </span>
-                    </td>
-                    <td className="py-2 px-4 text-right">
-                      <div className="flex flex-row justify-end items-center gap-2">
-                        <button
-                          onClick={() => setProjectToUpgrade(p)}
-                          className="px-2.5 py-1 bg-[#D4AF37] hover:bg-[#c59f2e] active:scale-[0.98] text-black text-xs sm:text-sm font-semibold rounded-lg transition-all shadow-sm whitespace-nowrap flex items-center gap-1 cursor-pointer"
-                          title="Upgrade Project Scopes & Assign Designers"
+                      </th>
+                      <th className="p-2">
+                        <input
+                          type="text"
+                          value={filterProjectName}
+                          onChange={(e) => handleFilterProjectNameChange(e.target.value)}
+                          placeholder="Filter Name..."
+                          className="w-full text-xs px-2 py-1 rounded border border-gray-300 dark:border-[#333333] bg-white dark:bg-[#1E1E1E] text-gray-900 dark:text-white font-normal focus:outline-none focus:ring-1 focus:ring-[#D4AF37]"
+                        />
+                      </th>
+                      <th className="p-2">
+                        <select
+                          value={filterScope}
+                          onChange={(e) => handleFilterScopeChange(e.target.value)}
+                          className="w-full text-xs px-2 py-1 rounded border border-gray-300 dark:border-[#333333] bg-white dark:bg-[#1E1E1E] text-gray-900 dark:text-white font-normal focus:outline-none focus:ring-1 focus:ring-[#D4AF37] max-w-[140px]"
                         >
-                          <Sparkles className="w-3.5 h-3.5" />
-                          <span>Upgrade Scope</span>
-                        </button>
-                        <button
-                          onClick={() => setSelectedProject(p)}
-                          className="px-2.5 py-1 bg-gray-100 hover:bg-gray-200 dark:bg-[#1E1E1E] dark:hover:bg-[#2A2A2A] text-gray-700 dark:text-gray-200 text-xs sm:text-sm font-semibold rounded-lg border border-gray-300 dark:border-[#2A2A2A] transition-colors shadow-sm whitespace-nowrap"
+                          <option value="">All Scopes</option>
+                          {uniqueScopes.map(s => (
+                            <option key={s} value={s}>{toTitleCase(s)}</option>
+                          ))}
+                        </select>
+                      </th>
+                      <th className="p-2">
+                        <input
+                          type="text"
+                          value={filterCapacity}
+                          onChange={(e) => handleFilterCapacityChange(e.target.value)}
+                          placeholder="Filter KW..."
+                          className="w-full text-xs px-2 py-1 rounded border border-gray-300 dark:border-[#333333] bg-white dark:bg-[#1E1E1E] text-gray-900 dark:text-white font-normal focus:outline-none focus:ring-1 focus:ring-[#D4AF37] max-w-[85px]"
+                        />
+                      </th>
+                      <th className="p-2">
+                        <select
+                          value={filterDesigner}
+                          onChange={(e) => handleFilterDesignerChange(e.target.value)}
+                          className="w-full text-xs px-2 py-1 rounded border border-gray-300 dark:border-[#333333] bg-white dark:bg-[#1E1E1E] text-gray-900 dark:text-white font-normal focus:outline-none focus:ring-1 focus:ring-[#D4AF37] max-w-[140px]"
                         >
-                          Request Change
-                        </button>
-                        <button
-                          onClick={() => {
-                            showToast("Transfer Project coming soon!");
-                          }}
-                          className="px-2.5 py-1 bg-gray-100 hover:bg-gray-200 dark:bg-[#1E1E1E] dark:hover:bg-[#2A2A2A] text-gray-700 dark:text-gray-200 text-xs sm:text-sm font-semibold rounded-lg border border-gray-300 dark:border-[#2A2A2A] transition-colors shadow-sm whitespace-nowrap"
+                          <option value="">All Designers</option>
+                          <option value="unassigned">Unassigned</option>
+                          {designers.map(d => (
+                            <option key={d.id} value={d.email}>{toTitleCase(d.name)}</option>
+                          ))}
+                        </select>
+                      </th>
+                      <th className="p-2">
+                        <select
+                          value={filterStatus}
+                          onChange={(e) => handleFilterStatusChange(e.target.value)}
+                          className="w-full text-xs px-2 py-1 rounded border border-gray-300 dark:border-[#333333] bg-white dark:bg-[#1E1E1E] text-gray-900 dark:text-white font-normal focus:outline-none focus:ring-1 focus:ring-[#D4AF37] max-w-[125px]"
                         >
-                          Transfer Project
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+                          <option value="">All Statuses</option>
+                          {uniqueStatuses.map(st => (
+                            <option key={st} value={st}>{toTitleCase(st.replace(/_/g, ' '))}</option>
+                          ))}
+                        </select>
+                      </th>
+                      <th className="p-2 text-right">
+                        {activeFiltersCount > 0 && (
+                          <button
+                            onClick={clearAllFilters}
+                            className="text-xs text-amber-600 dark:text-[#D4AF37] hover:underline font-semibold cursor-pointer"
+                          >
+                            Reset
+                          </button>
+                        )}
+                      </th>
+                    </tr>
+                  )}
+                </thead>
+                <tbody className="text-sm sm:text-base divide-y divide-gray-100 dark:divide-[#2A2A2A]">
+                  {paginatedProjects.map(p => (
+                    <tr key={p.id} className="transition-colors hover:bg-gray-50 dark:hover:bg-[#2A2A2A]">
+                      <td className="py-3 px-4 font-medium text-gray-800 dark:text-gray-200">{p.projectNumber || p.srNumber || '-'}</td>
+                      <td className="py-3 px-4 text-gray-600 dark:text-gray-300 whitespace-nowrap text-xs sm:text-sm font-medium">
+                        {getProjectDisplayDate(p)}
+                      </td>
+                      <td className="py-3 px-4 text-gray-800 dark:text-gray-200 font-medium">
+                        {toTitleCase(p.clientName)}
+                      </td>
+                      <td className="py-3 px-4 text-gray-800 dark:text-gray-200 font-medium">
+                        {toTitleCase(p[PROJECT_FIELDS.PROJECT_NAME] || '-')}
+                      </td>
+                      <td className="py-3 px-4 text-gray-700 dark:text-gray-200">
+                        {toTitleCase(p.scopeOfWork)}
+                        {p.subService && <span className="block text-xs sm:text-sm text-gray-500 dark:text-gray-400">{toTitleCase(p.subService)}</span>}
+                      </td>
+                      <td className="py-3 px-4 text-gray-700 dark:text-gray-200">
+                        {p.plantCapacity ? `${p.plantCapacity} ${p.capacityUnit || 'KW'}` : <span className="text-gray-400 italic">TBD</span>}
+                      </td>
+                      <td className="py-3 px-4">
+                        {p.assignedScopes && Object.keys(p.assignedScopes).length > 1 ? (
+                          <div className="flex flex-col gap-1.5 py-1 min-w-[220px]">
+                            <div className="flex items-center gap-1.5 text-[11px] font-bold text-amber-600 dark:text-[#D4AF37] uppercase tracking-wider">
+                              <Layers className="w-3.5 h-3.5" />
+                              <span>Split Scope ({Object.keys(p.assignedScopes).length})</span>
+                            </div>
+                            <div className="space-y-1">
+                              {Object.entries(p.assignedScopes).map(([sKey, dEmail]) => {
+                                const dEmailStr = String(dEmail || "");
+                                const designerObj = designers.find(d => d.email === dEmailStr);
+                                return (
+                                  <div key={sKey} className="flex items-center justify-between gap-1.5 bg-gray-50 dark:bg-[#252525] px-2 py-1 rounded border border-gray-200 dark:border-[#333333] text-xs">
+                                    <span className="font-semibold text-gray-700 dark:text-gray-300 font-mono text-[11px] truncate max-w-[75px]" title={sKey}>
+                                      {sKey}:
+                                    </span>
+                                    <select
+                                      value={dEmailStr}
+                                      onChange={(e) => handleReassignScopeDesigner(p.id, sKey, e.target.value)}
+                                      className="bg-transparent text-gray-900 dark:text-gray-100 text-xs font-medium focus:outline-none cursor-pointer max-w-[135px] truncate"
+                                      title={`Assigned: ${designerObj ? designerObj.name : dEmailStr}`}
+                                    >
+                                      <option value="" className="bg-white dark:bg-[#1E1E1E]">Unassigned</option>
+                                      {designers.map(d => (
+                                        <option key={d.id} value={d.email} className="bg-white dark:bg-[#1E1E1E]">
+                                          {d.name}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        ) : (
+                          <select
+                            value={p.designerEmail || (p.assignedScopes ? Object.values(p.assignedScopes)[0] : "") || ""}
+                            onChange={(e) => handleReassignDesigner(p.id, e.target.value)}
+                            className="bg-white dark:bg-[#1E1E1E] border border-gray-300 dark:border-[#2A2A2A] rounded-lg px-2.5 py-1 text-xs sm:text-sm font-semibold text-gray-800 dark:text-gray-200 focus:outline-none focus:ring-1 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] cursor-pointer max-w-[200px] hover:border-[#D4AF37]/50 transition-colors"
+                          >
+                            <option value="" className="bg-white dark:bg-[#1E1E1E] text-gray-900 dark:text-white">Unassigned</option>
+                            {designers.map(d => (
+                              <option key={d.id} value={d.email} className="bg-white dark:bg-[#1E1E1E] text-gray-900 dark:text-white">
+                                {toTitleCase(d.name)}
+                              </option>
+                            ))}
+                          </select>
+                        )}
+                      </td>
+                      <td className="py-3 px-4">
+                        <span className={`inline-block px-2 py-1 rounded text-xs font-medium border text-center ${getStatusColor(p.status)}`}>
+                          {toTitleCase(p.status.replace(/_/g, ' '))}
+                        </span>
+                      </td>
+                      <td className="py-2 px-4 text-right">
+                        <div className="flex flex-row justify-end items-center gap-2">
+                          <button
+                            onClick={() => setProjectToUpgrade(p)}
+                            className="px-2.5 py-1 bg-[#D4AF37] hover:bg-[#c59f2e] active:scale-[0.98] text-black text-xs sm:text-sm font-semibold rounded-lg transition-all shadow-sm whitespace-nowrap flex items-center gap-1 cursor-pointer"
+                            title="Upgrade Project Scopes & Assign Designers"
+                          >
+                            <Sparkles className="w-3.5 h-3.5" />
+                            <span>Upgrade Scope</span>
+                          </button>
+                          <button
+                            onClick={() => setSelectedProject(p)}
+                            className="px-2.5 py-1 bg-gray-100 hover:bg-gray-200 dark:bg-[#1E1E1E] dark:hover:bg-[#2A2A2A] text-gray-700 dark:text-gray-200 text-xs sm:text-sm font-semibold rounded-lg border border-gray-300 dark:border-[#2A2A2A] transition-colors shadow-sm whitespace-nowrap cursor-pointer"
+                          >
+                            Request Change
+                          </button>
+                          <button
+                            onClick={() => {
+                              showToast("Transfer Project coming soon!");
+                            }}
+                            className="px-2.5 py-1 bg-gray-100 hover:bg-gray-200 dark:bg-[#1E1E1E] dark:hover:bg-[#2A2A2A] text-gray-700 dark:text-gray-200 text-xs sm:text-sm font-semibold rounded-lg border border-gray-300 dark:border-[#2A2A2A] transition-colors shadow-sm whitespace-nowrap cursor-pointer"
+                          >
+                            Transfer Project
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Pagination Controls (Strictly 15 per page) */}
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-4 pt-3 border-t border-gray-200 dark:border-[#333333] px-1">
+              <div className="text-xs sm:text-sm text-gray-600 dark:text-gray-300 font-medium">
+                Page <span className="font-semibold text-gray-900 dark:text-white">{safeCurrentPage}</span> of <span className="font-semibold text-gray-900 dark:text-white">{totalPages}</span> • Showing <span className="font-semibold text-gray-900 dark:text-white">{filteredProjects.length === 0 ? "0" : `${(safeCurrentPage - 1) * PAGE_SIZE + 1}-${Math.min(safeCurrentPage * PAGE_SIZE, filteredProjects.length)}`}</span> of <span className="font-semibold text-gray-900 dark:text-white">{filteredProjects.length}</span> projects
+                {projects.length !== filteredProjects.length && (
+                  <span className="ml-1 text-xs text-amber-600 dark:text-[#D4AF37] font-medium">(filtered from {projects.length} total)</span>
+                )}
+              </div>
+
+              <div className="flex items-center gap-1.5 flex-wrap justify-center">
+                <button
+                  onClick={() => setCurrentPage(1)}
+                  disabled={safeCurrentPage === 1}
+                  className="p-1.5 rounded-lg border border-gray-300 dark:border-[#333333] bg-white dark:bg-[#1E1E1E] text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#2A2A2A] disabled:opacity-40 disabled:cursor-not-allowed text-xs transition-colors cursor-pointer"
+                  title="First Page"
+                >
+                  <ChevronsLeft className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                  disabled={safeCurrentPage === 1}
+                  className="px-3 py-1.5 rounded-lg border border-gray-300 dark:border-[#333333] bg-white dark:bg-[#1E1E1E] text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#2A2A2A] disabled:opacity-40 disabled:cursor-not-allowed text-xs sm:text-sm font-medium flex items-center gap-1 transition-colors cursor-pointer"
+                >
+                  <ChevronLeft className="w-4 h-4" />
+                  <span>Previous</span>
+                </button>
+
+                {/* Direct Page Numbers */}
+                <div className="flex items-center gap-1">
+                  {pageNumbers.map((page, idx) => {
+                    if (page === '...') {
+                      return <span key={`ellipsis-${idx}`} className="px-1 text-xs text-gray-400">...</span>;
+                    }
+                    const isCurrent = page === safeCurrentPage;
+                    return (
+                      <button
+                        key={`page-${page}`}
+                        onClick={() => setCurrentPage(Number(page))}
+                        className={`w-8 h-8 rounded-lg text-xs sm:text-sm font-medium transition-colors cursor-pointer ${
+                          isCurrent
+                            ? "bg-[#D4AF37] text-black font-bold shadow-sm"
+                            : "bg-white dark:bg-[#1E1E1E] border border-gray-300 dark:border-[#333333] text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#2A2A2A]"
+                        }`}
+                      >
+                        {page}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <button
+                  onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                  disabled={safeCurrentPage === totalPages}
+                  className="px-3 py-1.5 rounded-lg border border-gray-300 dark:border-[#333333] bg-white dark:bg-[#1E1E1E] text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#2A2A2A] disabled:opacity-40 disabled:cursor-not-allowed text-xs sm:text-sm font-medium flex items-center gap-1 transition-colors cursor-pointer"
+                >
+                  <span>Next</span>
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={() => setCurrentPage(totalPages)}
+                  disabled={safeCurrentPage === totalPages}
+                  className="p-1.5 rounded-lg border border-gray-300 dark:border-[#333333] bg-white dark:bg-[#1E1E1E] text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#2A2A2A] disabled:opacity-40 disabled:cursor-not-allowed text-xs transition-colors cursor-pointer"
+                  title="Last Page"
+                >
+                  <ChevronsRight className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
           </div>
         )}
 
