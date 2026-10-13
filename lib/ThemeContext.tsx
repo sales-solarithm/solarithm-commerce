@@ -2,7 +2,10 @@
 
 import React, { createContext, useContext, useEffect, useState } from 'react';
 
-type Theme = 'light' | 'dark' | 'system';
+export type Theme = 'light' | 'dark' | 'system';
+
+export const CANONICAL_THEME_KEY = "solarithm_theme_mode";
+export const LEGACY_THEME_KEY = "solarithm-theme";
 
 interface ThemeContextType {
   theme: Theme;
@@ -15,11 +18,15 @@ const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
 export const ThemeProvider = ({ children }: { children: React.ReactNode }) => {
   const [theme, setThemeState] = useState<Theme>(() => {
     if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('solarithm-theme') as Theme;
-      if (saved === 'light' || saved === 'dark' || saved === 'system') {
-        return saved;
+      try {
+        const saved = (localStorage.getItem(CANONICAL_THEME_KEY) || localStorage.getItem(LEGACY_THEME_KEY)) as Theme;
+        if (saved === 'light' || saved === 'dark' || saved === 'system') {
+          return saved;
+        }
+        return document.documentElement.classList.contains('dark') ? 'dark' : 'dark';
+      } catch {
+        return 'dark';
       }
-      return document.documentElement.classList.contains('dark') ? 'dark' : 'dark';
     }
     return 'dark';
   });
@@ -47,7 +54,12 @@ export const ThemeProvider = ({ children }: { children: React.ReactNode }) => {
     setThemeState(newTheme);
     applyThemeToDOM(newTheme);
     if (typeof window !== 'undefined') {
-      localStorage.setItem('solarithm-theme', newTheme);
+      try {
+        localStorage.setItem(CANONICAL_THEME_KEY, newTheme);
+        localStorage.setItem(LEGACY_THEME_KEY, newTheme);
+      } catch {
+        // Ignore storage exceptions
+      }
     }
   };
 
@@ -90,4 +102,3 @@ export const useTheme = () => {
   if (!context) throw new Error('useTheme must be used within a ThemeProvider');
   return context;
 };
-

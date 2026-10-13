@@ -98,6 +98,8 @@ export interface AuditLogItem {
 export const CLIENT_STATUS = { PENDING: 'pending_approval', APPROVED: 'approved', REJECTED: 'rejected' } as const;
 export const PROJECT_STATUS = {
   NOT_STARTED: 'not_started',
+  ASSIGNED: 'ASSIGNED',
+  PENDING: 'PENDING',
   IN_PROGRESS: 'in_progress',
   REQUIRED_DATA_PENDING: 'required_data_pending',
   IN_REVISION: 'in_revision',
@@ -106,22 +108,39 @@ export const PROJECT_STATUS = {
   COMPLETED: 'completed'
 } as const;
 
+export const PAYMENT_STATUS = {
+  PENDING: 'PENDING',
+  UNPAID: 'UNPAID',
+  PARTIAL: 'PARTIAL',
+  PARTIALLY_PAID: 'PARTIALLY_PAID',
+  PAID: 'PAID',
+  CANCELLED: 'CANCELLED'
+} as const;
+
+export const MARKET_SECTORS = ['Domestic', 'Commercial', 'Industrial'] as const;
+export type MarketSector = typeof MARKET_SECTORS[number];
+
 export const CLIENT_FIELDS = {
   COMPANY_NAME: 'companyName', CONTACT_PERSON: 'contactPerson', EMAIL: 'email', CLIENT_EMAIL: 'clientEmail',
   PHONE: 'phone', CONTACT_NUMBER: 'contactNumber',
   CITY: 'city', GSTIN: 'gstin', BILLING_ADDRESS: 'billingAddress', PRICING_CATEGORY: 'pricingCategory', SALES_PERSON_EMAIL: 'salesPersonEmail',
-  PROPOSAL_NUMBER: 'proposalNumber', STATUS: 'status', CREATED_AT: 'createdAt'
+  PROPOSAL_NUMBER: 'proposalNumber', STATUS: 'status', CREATED_AT: 'createdAt',
+  PAN: 'pan', PINCODE: 'pincode', CONSUMER_NUMBER: 'consumerNumber', SANCTION_NUMBER: 'sanctionNumber'
 } as const;
 
 export const PROJECT_FIELDS = {
   PROJECT_NAME: 'projectName',
   PROJECT_NUMBER: 'projectNumber', CLIENT_ID: 'clientId', CLIENT_NAME: 'clientName',
-  SCOPE_OF_WORK: 'scopeOfWork', SUB_SERVICE: 'subService', PLANT_CAPACITY: 'plantCapacity',
+  SCOPE_OF_WORK: 'scopeOfWork', MARKET_SECTOR: 'marketSector', PROJECT_SECTOR: 'projectSector', SECTOR: 'sector',
+  SUB_SERVICE: 'subService', PLANT_CAPACITY: 'plantCapacity',
   CAPACITY_UNIT: 'capacityUnit', LOCATION: 'location', DESIGNER_EMAIL: 'designerEmail',
+  DESIGNER_NAME: 'designerName', DESIGNER_ID: 'designerId', DESIGNER_UID: 'designerUid',
   PRICING_CATEGORY: 'pricingCategory', STATUS: 'status', CREATED_AT: 'createdAt', UPDATED_AT: 'updatedAt',
   MODULES: 'modules',
   ASSIGNED_SCOPES: 'assignedScopes',
-  DATE: 'date'
+  DATE: 'date',
+  PROJECT_DATE: 'projectDate',
+  PAYMENT_STATUS: 'paymentStatus'
 } as const;
 
 export interface ProjectRecord {
@@ -134,20 +153,29 @@ export interface ProjectRecord {
   clientId: string;
   clientName: string;
   scopeOfWork: string;
+  marketSector?: 'Domestic' | 'Commercial' | 'Industrial' | string;
+  projectSector?: string;
+  sector?: string;
   subService?: string | null;
   plantCapacity?: number | null;
   capacityUnit?: string;
   location: string;
   designerEmail: string;
   designerName?: string;
+  designerId?: string;
+  designerUid?: string;
   assignedScopes?: Record<string, string>; // Maps scope key (e.g. preDesign, pvsyst) to designer email
   modules?: ProjectModulePhase[];
   pricingCategory?: string;
   status: string;
+  paymentStatus?: string;
   remarks?: string | null;
   salesPersonEmail: string;
+  salesPerson?: string;
   salesPersonName?: string;
+  rate?: number | null;
   projectValue?: number | null;
+  projectCost?: number | null;
   createdAt?: any;
   updatedAt?: any;
 }

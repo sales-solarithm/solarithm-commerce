@@ -5,6 +5,7 @@ import { collection, addDoc, serverTimestamp, query, where, getDocs } from "fire
 import { db } from "@/lib/firebase";
 import { COLLECTIONS, APPROVAL_TYPES, APPROVAL_STATUS } from "@/src/config/schema";
 import { Loader2, KeyRound, CheckCircle2, AlertCircle, X, ShieldAlert } from "lucide-react";
+import { sanitizeFirestorePayload } from "@/lib/utils";
 
 interface PasswordResetModalProps {
   isOpen: boolean;
@@ -75,17 +76,17 @@ export default function PasswordResetModal({ isOpen, onClose, initialEmail = "" 
         createdAt: new Date().toISOString()
       };
 
-      await addDoc(approvalsRef, requestPayload);
+      await addDoc(approvalsRef, sanitizeFirestorePayload(requestPayload));
 
       // Optional telemetry log to auditLogs
       try {
-        await addDoc(collection(db, COLLECTIONS.AUDIT_LOGS), {
+        await addDoc(collection(db, COLLECTIONS.AUDIT_LOGS), sanitizeFirestorePayload({
           action: "PASSWORD_RESET_REQUESTED",
           actor: normalizedEmail,
           target: "approvals",
           details: { appName: "Solarithm Commerce", reason: reason.trim() },
           timestamp: serverTimestamp()
-        });
+        }));
       } catch (logErr) {
         console.warn("Audit log notice:", logErr);
       }

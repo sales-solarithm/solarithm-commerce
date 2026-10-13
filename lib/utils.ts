@@ -37,6 +37,8 @@ export function getStatusColor(status: string) {
     case 'REJECTED':
     case 'DELAYED':
       return 'text-rose-400 bg-rose-500/10 border-rose-500/30';
+    case 'ASSIGNED':
+      return 'text-sky-400 bg-sky-500/10 border-sky-500/30';
     case 'PENDING': 
     case 'PENDING_APPROVAL':
     case 'IN PROGRESS':
@@ -53,25 +55,59 @@ export function getStatusColor(status: string) {
   }
 }
 
-export function toScopeKey(scopeName: string): string {
-  const trimmed = (scopeName || '').trim();
-  if (!trimmed) return 'scope';
-  
-  const lower = trimmed.toLowerCase();
-  if (lower === 'pvsyst' || lower === 'pv-syst' || lower === 'pv syst') return 'pvsyst';
-  if (lower === 'predesign' || lower === 'pre-design' || lower === 'pre design') return 'preDesign';
-  if (lower === 'ceig') return 'ceig';
-  if (lower === 'ifp') return 'ifp';
-  if (lower === 'detailed engineering' || lower === 'detailed-engineering' || lower === 'detailedengineering') return 'detailedEngineering';
+/**
+ * Standardized Canonical Scope Key resolver across all ecosystem applications [SCH-01, SCH-04].
+ * Converts any scope name / label into canonical camelCase (e.g. detailedEngineering, permitPackage).
+ */
+export function toCanonicalScopeKey(scopeName: string): string {
+  if (!scopeName) return "scope";
+  const lower = scopeName.toLowerCase().trim();
+  if (lower === "pvsyst" || lower === "pv-syst" || lower === "pv syst") return "pvsyst";
+  if (lower === "predesign" || lower === "pre-design" || lower === "pre design") return "preDesign";
+  if (lower === "ceig") return "ceig";
+  if (lower === "ifp") return "ifp";
+  if (lower.includes("detailed")) return "detailedEngineering";
+  if (lower.includes("permit")) return "permitPackage";
+  if (lower.includes("sld") || lower.includes("single line")) return "sld";
+  if (lower.includes("bom") || lower.includes("bill of materials")) return "bom";
+  if (lower.includes("stamp")) return "peStamping";
+  if (lower.includes("as-built") || lower.includes("asbuilt")) return "asBuilt";
+  if (lower.includes("interconnection")) return "interconnection";
 
-  const cleaned = trimmed.replace(/[^\w\s-]/g, '').trim();
-  if (/^[A-Z0-9]+$/.test(cleaned)) {
-    return cleaned.toLowerCase();
+  const clean = lower.replace(/[^a-z0-9\s_-]/g, "");
+  const parts = clean.split(/[\s_-]+/).filter(Boolean);
+  if (parts.length === 0) return "scope";
+  if (parts.length === 1) return parts[0];
+  return parts[0] + parts.slice(1).map(p => p.charAt(0).toUpperCase() + p.slice(1)).join("");
+}
+
+export const toScopeKey = toCanonicalScopeKey;
+
+/**
+ * Safe String Identifier sanitizer per DAT-01 audit finding.
+ * Prevents numeric coercion that strips leading zeros or causes scientific notation.
+ */
+export function safeStringIdentifier(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "number") {
+    return Number.isFinite(value)
+      ? value.toLocaleString("fullwide", { useGrouping: false, maximumFractionDigits: 0 })
+      : "";
   }
-  const parts = cleaned.split(/[\s_-]+/).filter(Boolean);
-  if (parts.length === 0) return 'scope';
-  if (parts.length === 1) return parts[0].toLowerCase();
-  return parts[0].toLowerCase() + parts.slice(1).map(p => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()).join('');
+  return String(value).trim();
+}
+
+/**
+ * Standardized canonical project date resolution [PRJ-02].
+ * Strictly evaluates: projectDate -> date -> completedDate -> createdAt -> updatedAt.
+ */
+export function resolveProjectDate(project: Record<string, any>): Date | null {
+  if (!project) return null;
+  const raw = project.projectDate || project.date || project.completedDate || project.createdAt || project.updatedAt;
+  const millis = getSafeTimestampMillis(raw);
+  if (millis <= 0) return null;
+  const d = new Date(millis);
+  return isNaN(d.getTime()) ? null : d;
 }
 
 export interface ScopeItem {
@@ -143,14 +179,78 @@ export function parsePackageScopes(selectedScopeName: string, scopeObj?: any): S
 
 export interface DesignerPerson {
   id: string;
+  uid: string;
   name: string;
   email: string;
   department: string;
   designation: string;
   role: string;
   employeeId: string;
+  displayLabel?: string;
+  isOwner?: boolean;
 }
 
+/**
+ * Recursively cleanses Firestore payloads by removing undefined values
+ * and replacing common optional employee/user fields with safe defaults ("" or null),
+ * completely preventing FirebaseError: Function setDoc() called with invalid data. Unsupported field value: undefined [RULE 2 / FIRESTORE-SAFE].
+ */
+export function sanitizeFirestorePayload<T = any>(obj: any): T {
+  if (obj === null || obj === undefined) {
+    return null as any;
+  }
+  if (Array.isArray(obj)) {
+    return obj.map(item => sanitizeFirestorePayload(item)) as any;
+  }
+  if (typeof obj === "object" && !(obj instanceof Date) && !(obj?.toMillis && typeof obj.toMillis === "function")) {
+    const cleaned: Record<string, any> = {};
+    for (const [key, value] of Object.entries(obj)) {
+      if (value === undefined) {
+        // Fall back safe string for sensitive employee/user fields
+        if (["phone", "contactNumber", "mobile", "dateOfJoining", "dob", "bankDetails", "address", "emergencyContact"].includes(key)) {
+          cleaned[key] = "";
+        } else {
+          // Skip undefined property so Firestore never rejects
+          continue;
+        }
+      } else if (value !== null && typeof value === "object") {
+        cleaned[key] = sanitizeFirestorePayload(value);
+      } else {
+        cleaned[key] = value;
+      }
+    }
+    return cleaned as T;
+  }
+  return obj;
+}
+
+/**
+ * Reconciles or writes an employee user record with universal payload sanitization
+ * wrapped in an isolated error boundary so failures on a single document never abort or crash [RULE 2].
+ */
+export async function safeSyncEmployeeUserDoc(db: any, docId: string, data: any): Promise<boolean> {
+  if (!db || !docId) return false;
+  try {
+    const sanitized = sanitizeFirestorePayload({
+      ...data,
+      phone: data.phone || data.contactNumber || "",
+      updatedAt: new Date().toISOString()
+    });
+    const { doc, setDoc } = await import("firebase/firestore");
+    await setDoc(doc(db, "users", docId), sanitized, { merge: true });
+    return true;
+  } catch (err) {
+    console.warn(`[SafeUserSync] Isolated sync notice for users/${docId}:`, err);
+    return false;
+  }
+}
+
+/**
+ * Dual Role Inclusion:
+ * Queries active staff where role or designation includes 'DESIGNER', 'LEAD_DESIGNER', or 'OWNER' (case-insensitive).
+ * Dedicated designers are displayed as `Name (Designer)` and company partners as `Name (Partner / Designer)`.
+ * Binds designer's work email (@solarithmdesign.com) and Employee ID [RULE 3 / DESIGNER-01].
+ */
 export function filterAndDeduplicateDesigners(empDocs: any[], userDocs: any[] = []): DesignerPerson[] {
   const allDocs = [...(empDocs || []), ...(userDocs || [])];
 
@@ -158,37 +258,75 @@ export function filterAndDeduplicateDesigners(empDocs: any[], userDocs: any[] = 
 
   const rawList = allDocs.map(doc => {
     const d = typeof doc?.data === "function" ? doc.data() : (doc || {});
-    const docId = doc?.id || d?.id || "";
+    const docId = doc?.id || d?.id || d?.uid || "";
+    const canonicalUid = d?.uid || doc?.id || d?.id || "";
+    
+    // Resolve email preferring @solarithmdesign.com
+    const primaryEmail = (d.email || "").trim().toLowerCase();
+    const personalEmail = (d.personalEmail || d.personalEmailAddress || "").trim().toLowerCase();
+    const workEmail = primaryEmail.includes("@solarithmdesign.com")
+      ? primaryEmail
+      : (personalEmail.includes("@solarithmdesign.com") ? personalEmail : primaryEmail);
+
+    const empId = (d.employeeId || d.empId || "").trim().toUpperCase();
+
     return {
       id: docId,
-      name: d.name || d.displayName || d.employeeName || d.email || "Unnamed Employee",
-      email: (d.email || "").trim().toLowerCase(),
-      personalEmail: (d.personalEmail || d.personalEmailAddress || "").trim().toLowerCase(),
+      uid: canonicalUid,
+      name: d.name || d.displayName || d.employeeName || d.fullName || primaryEmail.split('@')[0] || "Unnamed Employee",
+      email: workEmail || primaryEmail,
+      primaryEmail,
+      personalEmail,
       department: (d.department || "").trim(),
       designation: (d.designation || "").trim(),
       role: (d.role || d.assignedRole || "").trim(),
-      employeeId: (d.employeeId || "").trim().toUpperCase()
+      employeeId: empId || (docId ? `EMP-${docId.slice(0, 6).toUpperCase()}` : "")
     };
   }).filter(u => Boolean(u.email));
 
-  // 1. Relax Designer Query / Filtering Logic:
-  // Populate the dropdown with any user where:
-  // - department.toLowerCase() === 'design' OR includes 'design'
-  // - role.toLowerCase().includes('design')
-  // - designation.toLowerCase().includes('design')
+  // 1. Dual Role Inclusion:
+  // Match staff where role or designation includes 'DESIGNER', 'LEAD_DESIGNER', or 'OWNER' (case-insensitive)
   const designCandidates = rawList.filter(u => {
     const dept = u.department.toLowerCase();
     const role = u.role.toLowerCase();
     const desig = u.designation.toLowerCase();
-    return (
+
+    const isOwnerOrPartner = (
+      role.includes("owner") ||
+      desig.includes("owner") ||
+      role.includes("partner") ||
+      desig.includes("partner") ||
+      role.includes("director") ||
+      desig.includes("director") ||
+      role.includes("founder") ||
+      desig.includes("founder")
+    );
+
+    const isDesignerRole = (
+      role.includes("designer") ||
+      desig.includes("designer") ||
+      role.includes("lead_designer") ||
+      desig.includes("lead_designer") ||
+      role.includes("lead designer") ||
+      desig.includes("lead designer") ||
+      role === "designer" ||
+      desig === "designer" ||
+      role === "lead_designer" ||
       dept === "design" ||
       dept.includes("design") ||
-      role.includes("design") ||
-      desig.includes("design")
+      dept.includes("engineering") ||
+      role.includes("engineering") ||
+      desig.includes("engineering") ||
+      role.includes("engineer") ||
+      desig.includes("engineer") ||
+      dept.includes("technical") ||
+      role === "employee"
     );
+
+    return isOwnerOrPartner || isDesignerRole;
   });
 
-  // 2. Deduplicate User Records:
+  // 2. Deduplicate User Records & format display labels:
   // Match by official workspace email (@solarithmdesign.com) and deduplicate by employee ID or normalized name so each team member appears exactly once.
   const deduplicated: Array<any> = [];
 
@@ -208,47 +346,111 @@ export function filterAndDeduplicateDesigners(empDocs: any[], userDocs: any[] = 
 
     const isWorkspace = candEmail.includes("@solarithmdesign.com");
 
+    const roleLower = candidate.role.toLowerCase();
+    const desigLower = candidate.designation.toLowerCase();
+    const isOwner = (
+      roleLower.includes("owner") ||
+      desigLower.includes("owner") ||
+      roleLower.includes("partner") ||
+      desigLower.includes("partner") ||
+      roleLower.includes("director") ||
+      desigLower.includes("director") ||
+      roleLower.includes("founder") ||
+      desigLower.includes("founder")
+    );
+
+    const displayLabel = isOwner
+      ? `${candidate.name} (Partner / Designer)`
+      : `${candidate.name} (Designer)`;
+
+    const candidateObj = {
+      ...candidate,
+      normName: candNormName,
+      isWorkspace,
+      isOwner,
+      displayLabel
+    };
+
     if (existingIndex === -1) {
-      deduplicated.push({
-        ...candidate,
-        normName: candNormName,
-        isWorkspace
-      });
+      deduplicated.push(candidateObj);
     } else {
       const existing = deduplicated[existingIndex];
       const existingIsWorkspace = existing.email.includes("@solarithmdesign.com");
       if (!existingIsWorkspace && isWorkspace) {
         deduplicated[existingIndex] = {
-          ...candidate,
+          ...candidateObj,
           normName: candNormName || existing.normName,
+          employeeId: candidate.employeeId || existing.employeeId,
           isWorkspace: true
         };
-      } else if (isWorkspace && !existing.employeeId && candidate.employeeId) {
+      } else {
+        // Merge attributes prioritizing @solarithmdesign.com and non-empty employeeId
         deduplicated[existingIndex] = {
           ...existing,
-          ...candidate,
-          normName: candNormName || existing.normName,
-          isWorkspace: true
+          employeeId: existing.employeeId || candidate.employeeId,
+          email: existingIsWorkspace ? existing.email : (isWorkspace ? candidate.email : existing.email),
+          isOwner: existing.isOwner || isOwner,
+          displayLabel: (existing.isOwner || isOwner)
+            ? `${existing.name || candidate.name} (Partner / Designer)`
+            : `${existing.name || candidate.name} (Designer)`
         };
       }
     }
   }
 
   // Fallback if no specific design candidates found
-  const finalPool = deduplicated.length > 0 ? deduplicated : rawList;
+  const finalPool = deduplicated.length > 0 ? deduplicated : rawList.map(c => ({
+    ...c,
+    displayLabel: `${c.name} (Designer)`,
+    isOwner: false
+  }));
 
-  // Sort by name for clean presentation
-  finalPool.sort((a, b) => a.name.localeCompare(b.name));
+  // Sort alphabetically by name for clean presentation
+  finalPool.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
 
   return finalPool.map(d => ({
     id: d.id,
+    uid: d.uid || d.id,
     name: d.name,
     email: d.email,
     department: d.department,
     designation: d.designation,
     role: d.role,
-    employeeId: d.employeeId
+    employeeId: d.employeeId,
+    displayLabel: d.displayLabel || (d.isOwner ? `${d.name} (Partner / Designer)` : `${d.name} (Designer)`),
+    isOwner: Boolean(d.isOwner)
   }));
+}
+
+/**
+ * Decoupled Directory Fetcher:
+ * Reads /employees and /users safely without failing if background writes fail.
+ * Directory fetching is strictly read-only without side-effect mutations [DATA-03].
+ */
+export async function fetchEmployees(db: any): Promise<DesignerPerson[]> {
+  if (!db) return [];
+  try {
+    const { collection, getDocs } = await import("firebase/firestore");
+    const [empResult, userResult] = await Promise.allSettled([
+      getDocs(collection(db, "employees")),
+      getDocs(collection(db, "users"))
+    ]);
+
+    const empDocs = empResult.status === "fulfilled" ? empResult.value.docs : [];
+    const userDocs = userResult.status === "fulfilled" ? userResult.value.docs : [];
+
+    if (empResult.status === "rejected") {
+      console.warn("Notice: /employees directory fetch rejected, continuing with /users:", empResult.reason);
+    }
+    if (userResult.status === "rejected") {
+      console.warn("Notice: /users directory fetch rejected, continuing with /employees:", userResult.reason);
+    }
+
+    return filterAndDeduplicateDesigners(empDocs, userDocs);
+  } catch (err) {
+    console.error("Error in fetchEmployees:", err);
+    return [];
+  }
 }
 
 /**
@@ -400,6 +602,36 @@ export function getProjectDisplayDate(project: any): string {
     if (formatted !== "-") return formatted;
   }
   return "-";
+}
+
+/**
+ * Normalizes scope strings for case-insensitive and punctuation-insensitive deduplication [ENG-SCOPE-01].
+ * Treats variations like "PRE DESIGN", "PRE-DESIGN", "pre design", "Pre_Design" as identical.
+ * Also normalizes compound package variations like "PRE DESIGN + PVSYST" and "PRE-DESIGN + PVsyst".
+ */
+export function normalizeScopeDeduplicationKey(scopeStr: string): string {
+  if (!scopeStr) return "";
+  return scopeStr
+    .toLowerCase()
+    .trim()
+    .replace(/&/g, "+")
+    .replace(/[^a-z0-9+]/g, "");
+}
+
+/**
+ * Validates if a scope record is active and visible in the Admin Console master taxonomy.
+ */
+export function isScopeVisibleInAdmin(item: any): boolean {
+  if (!item || typeof item !== "object") return false;
+  if (item.active === false || item.isActive === false) return false;
+  if (item.visible === false || item.isVisible === false) return false;
+  if (item.enabled === false) return false;
+  if (item.deleted === true || item.isDeleted === true) return false;
+  const status = String(item.status || "").toLowerCase().trim();
+  if (status === "inactive" || status === "archived" || status === "deleted" || status === "disabled") {
+    return false;
+  }
+  return true;
 }
 
 

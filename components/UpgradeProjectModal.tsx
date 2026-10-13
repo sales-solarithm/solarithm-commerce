@@ -4,7 +4,7 @@ import { useState, useMemo, useCallback } from "react";
 import { doc, updateDoc, serverTimestamp, collection, addDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { COLLECTIONS, PROJECT_FIELDS, PROJECT_STATUS } from "@/src/config/schema";
-import { toScopeKey, parsePackageScopes, type ScopeItem } from "@/lib/utils";
+import { toCanonicalScopeKey, parsePackageScopes, normalizeScopeDeduplicationKey, isScopeVisibleInAdmin, sanitizeFirestorePayload, type ScopeItem } from "@/lib/utils";
 import confetti from "canvas-confetti";
 import {
   X,
@@ -45,15 +45,20 @@ export default function UpgradeProjectModal({
   initialTargetScope,
   onSuccess
 }: UpgradeProjectModalProps) {
-  // Filter designers strictly to members of the Design department and deduplicate
+  // Filter designers strictly to members of the Design department or design role and deduplicate
   const designMembers = useMemo(() => {
     const list = (designers || []).filter(d => {
       if (!d || !d.email) return false;
-      if (!d.department && !d.role && !d.designation) return true;
       const dept = (d.department || "").toLowerCase();
       const role = (d.role || "").toLowerCase();
       const desig = (d.designation || "").toLowerCase();
-      return dept.includes("design") || role.includes("design") || desig.includes("design");
+      return (
+        dept.includes("design") ||
+        role.includes("design") ||
+        role === "employee" ||
+        role === "designer" ||
+        desig.includes("design")
+      );
     });
 
     const seen = new Set<string>();
@@ -68,18 +73,22 @@ export default function UpgradeProjectModal({
     return unique.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
   }, [designers]);
 
-  // Format scope key back to a user-friendly label
+  // Format scope key back to a user-friendly label strictly from Firestore master scope list
   const getScopeLabel = useCallback((keyOrName: string): string => {
-    const lower = (keyOrName || "").toLowerCase();
-    if (lower === "predesign" || lower === "pre-design") return "Pre-Design";
-    if (lower === "pvsyst" || lower === "pv-syst") return "PVsyst";
-    if (lower === "ceig") return "CEIG";
-    if (lower === "ifp") return "IFP";
-    if (lower === "detailedengineering" || lower === "detailed engineering") return "Detailed Engineering";
+    if (!keyOrName) return "";
+    const canonicalKey = toCanonicalScopeKey(keyOrName);
+    const dedupKey = normalizeScopeDeduplicationKey(keyOrName);
     
-    // Check scopesData
-    const found = scopesData.find(s => toScopeKey(s.name) === keyOrName || s.name === keyOrName);
-    if (found) return found.name;
+    // Check scopesData dynamically from Admin Console
+    const found = scopesData.find(s => {
+      const sName = (s.name || s.packageName || s.title || s.label || "").trim();
+      return sName === keyOrName || 
+        toCanonicalScopeKey(sName) === canonicalKey || 
+        normalizeScopeDeduplicationKey(sName) === dedupKey;
+    });
+    if (found) {
+      return (found.name || found.packageName || found.title || found.label || "").trim();
+    }
     return keyOrName;
   }, [scopesData]);
 
@@ -101,152 +110,171 @@ export default function UpgradeProjectModal({
       status?: string;
     }> = [];
 
-    // Map existing module status if present
-    const modulesMap = new Map<string, any>();
-    if (Array.isArray(project.modules)) {
-      project.modules.forEach((m: any) => {
-        if (m.phaseKey) modulesMap.set(toScopeKey(m.phaseKey), m);
-        if (m.phaseName) modulesMap.set(toScopeKey(m.phaseName), m);
+    // 1. From assignedScopes map
+    if (project.assignedScopes && typeof project.assignedScopes === "object") {
+      Object.entries(project.assignedScopes).forEach(([rawKey, emailVal]) => {
+        const email = String(emailVal || "").trim();
+        if (email) {
+          const canonicalKey = toCanonicalScopeKey(rawKey);
+          const dObj = designers.find(d => d.email.toLowerCase() === email.toLowerCase());
+          result.push({
+            key: canonicalKey,
+            label: getScopeLabel(canonicalKey),
+            designerEmail: email,
+            designerName: dObj?.name || email.split("@")[0]
+          });
+        }
       });
     }
 
-    if (project.assignedScopes && typeof project.assignedScopes === "object" && Object.keys(project.assignedScopes).length > 0) {
-      for (const [rawKey, email] of Object.entries(project.assignedScopes)) {
-        const key = toScopeKey(rawKey);
-        const dEmail = String(email || "");
-        const dObj = designers.find(d => d.email.toLowerCase() === dEmail.toLowerCase());
-        const mod = modulesMap.get(key);
-        result.push({
-          key,
-          label: getScopeLabel(rawKey),
-          designerEmail: dEmail,
-          designerName: dObj?.name || (dEmail ? dEmail.split("@")[0] : "Assigned Designer"),
-          status: mod?.status || project.status || "Active"
-        });
-      }
-      return result;
-    }
-
-    // Fallback for legacy projects without assignedScopes map
-    if (project.scopeOfWork) {
-      const parsed = parsePackageScopes(project.scopeOfWork);
-      const fallbackEmail = project.designerEmail || "";
-      const dObj = designers.find(d => d.email.toLowerCase() === fallbackEmail.toLowerCase());
-      parsed.forEach(p => {
-        const mod = modulesMap.get(p.key);
-        result.push({
-          key: p.key,
-          label: p.label,
-          designerEmail: fallbackEmail,
-          designerName: dObj?.name || project.designerName || (fallbackEmail ? fallbackEmail.split("@")[0] : "Assigned Designer"),
-          status: mod?.status || project.status || "Active"
-        });
+    // 2. From modules array if present
+    if (Array.isArray(project.modules) && project.modules.length > 0) {
+      project.modules.forEach((mod: any) => {
+        const canonicalKey = toCanonicalScopeKey(mod.phaseKey || mod.phaseName || "");
+        const email = String(mod.assignedDesignerEmail || "").trim();
+        const existingIdx = result.findIndex(r => r.key === canonicalKey);
+        if (existingIdx === -1 && canonicalKey) {
+          const dObj = designers.find(d => d.email.toLowerCase() === email.toLowerCase());
+          result.push({
+            key: canonicalKey,
+            label: mod.phaseName || getScopeLabel(canonicalKey),
+            designerEmail: email,
+            designerName: mod.assignedDesignerName || dObj?.name || (email ? email.split("@")[0] : "Unassigned"),
+            status: mod.status
+          });
+        } else if (existingIdx >= 0 && mod.status) {
+          result[existingIdx].status = mod.status;
+        }
       });
-      return result;
     }
 
-    return [];
+    // 3. Fallback: single scope project
+    if (result.length === 0 && project.scopeOfWork) {
+      const canonicalKey = toCanonicalScopeKey(project.scopeOfWork);
+      const email = String(project.designerEmail || "").trim();
+      const dObj = designers.find(d => d.email.toLowerCase() === email.toLowerCase());
+      result.push({
+        key: canonicalKey,
+        label: project.scopeOfWork,
+        designerEmail: email,
+        designerName: project.designerName || dObj?.name || (email ? email.split("@")[0] : "Unassigned"),
+        status: project.status
+      });
+    }
+
+    return result;
   }, [project, designers, getScopeLabel]);
 
-  // Quick lookup map for historical scope by normalized key
+  // Fast lookup map for historical scopes
   const historicalScopeMap = useMemo(() => {
-    const map = new Map<string, { key: string; label: string; designerEmail: string; designerName: string; status?: string }>();
+    const map = new Map<string, typeof historicalScopes[0]>();
     historicalScopes.forEach(s => {
-      map.set(toScopeKey(s.key), s);
-      map.set(toScopeKey(s.label), s);
+      map.set(toCanonicalScopeKey(s.key), s);
     });
     return map;
   }, [historicalScopes]);
 
-  // List of all registered packages/scopes from scopesData (Firestore)
-  const availablePackages = useMemo(() => {
-    const list = scopesData
-      .map(s => (s.name || s.packageName || s.title || "").trim())
-      .filter(Boolean);
-    const unique = Array.from(new Set(list));
-    return unique.sort((a, b) => a.localeCompare(b));
-  }, [scopesData]);
+  // Target Package Selection State
+  const [selectedTargetPackage, setSelectedTargetPackage] = useState<string>(() => {
+    if (initialTargetScope) return initialTargetScope;
+    return "";
+  });
 
-  // Selected Target Package state
-  const [selectedTargetPackage, setSelectedTargetPackage] = useState<string>(() => initialTargetScope?.trim() || "");
-
-  // Map of newly assigned designers for new sub-scopes: { [scopeKey]: designerEmail }
+  // Designer assignments for newly added sub-scopes: { [canonicalScopeKey]: designerEmail }
   const [newlyAssignedDesigners, setNewlyAssignedDesigners] = useState<Record<string, string>>({});
-
-  // Additional optional inputs
-  const [upgradeNotes, setUpgradeNotes] = useState<string>("");
+  const [upgradeNotes, setUpgradeNotes] = useState("");
   const [revisedCapacity, setRevisedCapacity] = useState<string>("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
 
-  // Adjust state when props change (React recommended pattern)
-  const [prevProps, setPrevProps] = useState({ projectId: project?.id, initialTargetScope, isOpen });
-  if (prevProps.projectId !== project?.id || prevProps.initialTargetScope !== initialTargetScope || prevProps.isOpen !== isOpen) {
-    setPrevProps({ projectId: project?.id, initialTargetScope, isOpen });
-    setSelectedTargetPackage(initialTargetScope?.trim() || "");
-    setNewlyAssignedDesigners({});
-    setUpgradeNotes("");
-    setRevisedCapacity("");
-    setErrorMsg("");
-  }
+  // Available packages from Firestore scopes collection with strict deduplication
+  const availablePackages = useMemo(() => {
+    const scopeMap = new Map<string, { canonicalLabel: string; order: number }>();
+    for (const item of scopesData) {
+      if (!isScopeVisibleInAdmin(item)) continue;
+      const canonicalLabel = (item.name || item.packageName || item.title || item.label || item.scopeName || "").trim();
+      if (!canonicalLabel) continue;
 
-  // Target package scope document
+      const dedupKey = normalizeScopeDeduplicationKey(canonicalLabel);
+      if (!dedupKey) continue;
+
+      const order = typeof item.order === "number"
+        ? item.order
+        : typeof item.displayOrder === "number"
+          ? item.displayOrder
+          : 999999;
+
+      if (!scopeMap.has(dedupKey)) {
+        scopeMap.set(dedupKey, { canonicalLabel, order });
+      } else {
+        const existing = scopeMap.get(dedupKey)!;
+        if (order < existing.order) existing.order = order;
+        if (canonicalLabel === canonicalLabel.toUpperCase() && existing.canonicalLabel !== existing.canonicalLabel.toUpperCase()) {
+          existing.canonicalLabel = canonicalLabel;
+        }
+      }
+    }
+    return Array.from(scopeMap.values())
+      .sort((a, b) => {
+        if (a.order !== b.order) return a.order - b.order;
+        return a.canonicalLabel.localeCompare(b.canonicalLabel, undefined, { sensitivity: "base" });
+      })
+      .map(e => e.canonicalLabel);
+  }, [scopesData]);
+
+  // Target Scope Document if matching
   const targetScopeDoc = useMemo(() => {
     if (!selectedTargetPackage) return null;
-    return scopesData.find(s => s.name === selectedTargetPackage);
-  }, [scopesData, selectedTargetPackage]);
+    return scopesData.find(s => s.name === selectedTargetPackage) || null;
+  }, [selectedTargetPackage, scopesData]);
 
-  // Parsed sub-scopes for the selected target package
+  // Parse the target package into constituent sub-scopes
   const targetSubScopes = useMemo((): ScopeItem[] => {
     if (!selectedTargetPackage) return [];
-    return parsePackageScopes(selectedTargetPackage, targetScopeDoc);
+    return parsePackageScopes(selectedTargetPackage, targetScopeDoc).map(s => ({
+      key: toCanonicalScopeKey(s.key),
+      label: s.label
+    }));
   }, [selectedTargetPackage, targetScopeDoc]);
 
-  // Categorize sub-scopes into Preserved vs New
+  // Categorize sub-scopes: preserved vs. brand-new
   const { preservedSubScopes, newSubScopes } = useMemo(() => {
-    const preserved: Array<{
-      key: string;
-      label: string;
-      designerEmail: string;
-      designerName: string;
-      status?: string;
-    }> = [];
-
-    const newScopes: ScopeItem[] = [];
+    const preserved: Array<ScopeItem & { designerEmail: string; designerName: string }> = [];
+    const added: ScopeItem[] = [];
 
     targetSubScopes.forEach(sub => {
-      const normalizedKey = toScopeKey(sub.key);
-      const match = historicalScopeMap.get(normalizedKey) || historicalScopeMap.get(toScopeKey(sub.label));
-
-      if (match) {
+      const canonicalKey = toCanonicalScopeKey(sub.key);
+      const existing = historicalScopeMap.get(canonicalKey);
+      if (existing) {
         preserved.push({
-          key: sub.key,
-          label: sub.label,
-          designerEmail: match.designerEmail,
-          designerName: match.designerName,
-          status: match.status
+          ...sub,
+          key: canonicalKey,
+          designerEmail: existing.designerEmail,
+          designerName: existing.designerName
         });
       } else {
-        newScopes.push(sub);
+        added.push({
+          ...sub,
+          key: canonicalKey
+        });
       }
     });
 
-    return { preservedSubScopes: preserved, newSubScopes: newScopes };
+    return { preservedSubScopes: preserved, newSubScopes: added };
   }, [targetSubScopes, historicalScopeMap]);
 
-  // Handle designer selection for a new sub-scope
   const handleDesignerChange = (scopeKey: string, designerEmail: string) => {
+    const canonicalKey = toCanonicalScopeKey(scopeKey);
     setNewlyAssignedDesigners(prev => ({
       ...prev,
-      [scopeKey]: designerEmail
+      [canonicalKey]: designerEmail
     }));
     setErrorMsg("");
   };
 
-  // Quick assign all new sub-scopes to one designer
   const handleQuickAssignAllNew = (designerEmail: string) => {
     if (!designerEmail) return;
-    const update: Record<string, string> = {};
+    const update: Record<string, string> = { ...newlyAssignedDesigners };
     newSubScopes.forEach(s => {
       update[s.key] = designerEmail;
     });
@@ -285,65 +313,67 @@ export default function UpgradeProjectModal({
     try {
       const projectRef = doc(db, COLLECTIONS.PROJECTS, project.id);
 
-      const updatePayload: Record<string, any> = {
-        [PROJECT_FIELDS.UPDATED_AT]: serverTimestamp(),
-        [PROJECT_FIELDS.SCOPE_OF_WORK]: selectedTargetPackage
-      };
-
-      // 1. Preserve historical assignedScopes and merge newly assigned scopes
+      // [WRK-02 Remediated]: Maintain a single, complete assignedScopes map directly.
+      // Do NOT specify both parent 'assignedScopes' and nested 'assignedScopes.key' paths in the same payload.
       const updatedAssignedScopes: Record<string, string> = {
         ...(project.assignedScopes || {})
       };
 
-      // Backfill any historical scopes from legacy structure if not yet in map
+      // Backfill historical scopes into the map with canonical keys
       historicalScopes.forEach(h => {
-        if (!updatedAssignedScopes[h.key] && h.designerEmail) {
-          updatedAssignedScopes[h.key] = h.designerEmail;
+        const canonicalKey = toCanonicalScopeKey(h.key);
+        if (!updatedAssignedScopes[canonicalKey] && h.designerEmail) {
+          updatedAssignedScopes[canonicalKey] = h.designerEmail;
         }
       });
 
-      // Merge new sub-scopes
+      // Merge new sub-scopes with canonical keys
       newSubScopes.forEach(s => {
-        const designerEmail = newlyAssignedDesigners[s.key];
-        updatedAssignedScopes[s.key] = designerEmail;
-        updatePayload[`${PROJECT_FIELDS.ASSIGNED_SCOPES}.${s.key}`] = designerEmail;
+        const canonicalKey = toCanonicalScopeKey(s.key);
+        updatedAssignedScopes[canonicalKey] = newlyAssignedDesigners[canonicalKey] || newlyAssignedDesigners[s.key];
       });
-
-      updatePayload[PROJECT_FIELDS.ASSIGNED_SCOPES] = updatedAssignedScopes;
 
       // 2. Append new modules while strictly preserving existing modules and their status
       const existingModules: any[] = Array.isArray(project.modules) ? [...project.modules] : [];
       
-      // If legacy project had no modules array, synthesize historical module so it isn't lost
+      // If legacy project had no modules array, synthesize historical modules
       if (existingModules.length === 0 && historicalScopes.length > 0) {
         historicalScopes.forEach(h => {
           existingModules.push({
-            phaseKey: h.key,
+            phaseKey: toCanonicalScopeKey(h.key),
             phaseName: h.label,
-            status: h.status || project.status || PROJECT_STATUS.IN_PROGRESS,
+            status: h.status || project.status || "ASSIGNED",
             assignedDesignerEmail: h.designerEmail,
             assignedDesignerName: h.designerName,
-            startedAt: project.createdAt || null,
+            startedAt: null,
             completedAt: null
           });
         });
       }
 
       const newModules = newSubScopes.map(s => {
-        const dEmail = newlyAssignedDesigners[s.key];
+        const canonicalKey = toCanonicalScopeKey(s.key);
+        const dEmail = newlyAssignedDesigners[canonicalKey] || newlyAssignedDesigners[s.key];
         const dObj = designers.find(d => d.email.toLowerCase() === dEmail.toLowerCase());
         return {
-          phaseKey: s.key,
+          phaseKey: canonicalKey,
           phaseName: s.label,
-          status: PROJECT_STATUS.NOT_STARTED,
+          status: "ASSIGNED",
           assignedDesignerEmail: dEmail,
           assignedDesignerName: dObj?.name || dEmail.split("@")[0],
+          assignedDesignerId: dObj?.id || dObj?.uid || "",
+          assignedDesignerUid: dObj?.uid || dObj?.id || "",
           startedAt: null,
           completedAt: null
         };
       });
 
-      updatePayload[PROJECT_FIELDS.MODULES] = [...existingModules, ...newModules];
+      const updatePayload: Record<string, any> = {
+        [PROJECT_FIELDS.SCOPE_OF_WORK]: selectedTargetPackage,
+        [PROJECT_FIELDS.ASSIGNED_SCOPES]: updatedAssignedScopes,
+        [PROJECT_FIELDS.MODULES]: [...existingModules, ...newModules],
+        [PROJECT_FIELDS.UPDATED_AT]: serverTimestamp()
+      };
 
       // 3. Optional remarks / capacity updates
       if (upgradeNotes.trim()) {
@@ -353,17 +383,17 @@ export default function UpgradeProjectModal({
           : `Scope Upgrade to ${selectedTargetPackage}: ${upgradeNotes.trim()}`;
       }
 
-      if (revisedCapacity && !isNaN(Number(revisedCapacity)) && Number(revisedCapacity) > 0) {
+      if (revisedCapacity !== "" && !isNaN(Number(revisedCapacity)) && Number(revisedCapacity) >= 0) {
         updatePayload[PROJECT_FIELDS.PLANT_CAPACITY] = Number(revisedCapacity);
       }
 
-      await updateDoc(projectRef, updatePayload);
+      await updateDoc(projectRef, sanitizeFirestorePayload(updatePayload));
 
       // 4. Audit Log
       try {
-        await addDoc(collection(db, COLLECTIONS.AUDIT_LOGS), {
+        await addDoc(collection(db, COLLECTIONS.AUDIT_LOGS), sanitizeFirestorePayload({
           action: "PROJECT_SCOPE_UPGRADED",
-          actor: lockedEmail,
+          actor: lockedEmail || "sales",
           target: project.projectName || project.id,
           details: {
             projectId: project.id,
@@ -372,11 +402,10 @@ export default function UpgradeProjectModal({
             upgradedScope: selectedTargetPackage,
             preservedScopes: preservedSubScopes.map(p => ({ key: p.key, label: p.label, designer: p.designerEmail })),
             newlyAddedScopes: newSubScopes.map(n => ({ key: n.key, label: n.label, designer: newlyAssignedDesigners[n.key] })),
-            totalSubScopes: preservedSubScopes.length + newSubScopes.length,
-            timestamp: serverTimestamp()
+            totalSubScopes: preservedSubScopes.length + newSubScopes.length
           },
           timestamp: serverTimestamp()
-        });
+        }));
       } catch (auditErr) {
         console.warn("Audit log notice:", auditErr);
       }
@@ -402,24 +431,24 @@ export default function UpgradeProjectModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in duration-200">
-      <div className="w-full max-w-2xl bg-[#181818] text-white rounded-2xl shadow-2xl border border-[#3A3A3A] overflow-hidden flex flex-col max-h-[92vh] animate-in zoom-in-95 duration-200">
+      <div className="w-full max-w-2xl bg-white dark:bg-[#181818] text-gray-900 dark:text-white rounded-2xl shadow-2xl border border-gray-200 dark:border-[#3A3A3A] overflow-hidden flex flex-col max-h-[92vh] animate-in zoom-in-95 duration-200">
         
         {/* Modal Header */}
-        <div className="px-5 sm:px-6 py-4 border-b border-[#2A2A2A] bg-[#1E1E1E] flex items-center justify-between">
+        <div className="px-5 sm:px-6 py-4 border-b border-gray-200 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#1E1E1E] flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-[#2A2A2A] border border-amber-500/30 flex items-center justify-center text-[#D4AF37]">
+            <div className="w-10 h-10 rounded-xl bg-amber-50 dark:bg-[#2A2A2A] border border-amber-500/30 flex items-center justify-center text-amber-600 dark:text-[#D4AF37]">
               <Sparkles className="w-5 h-5" />
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 className="text-lg sm:text-xl font-bold font-sans text-white tracking-wide">
+                <h2 className="text-lg sm:text-xl font-bold font-sans text-gray-900 dark:text-white tracking-wide">
                   Upgrade Scope of Work / Package
                 </h2>
-                <span className="px-2 py-0.5 text-xs font-mono font-bold rounded bg-amber-500/20 text-[#D4AF37] border border-amber-500/30">
+                <span className="px-2 py-0.5 text-xs font-mono font-bold rounded bg-amber-100 dark:bg-amber-500/20 text-amber-800 dark:text-[#D4AF37] border border-amber-300 dark:border-amber-500/30">
                   {project.projectNumber || project.srNumber || "PROJECT"}
                 </span>
               </div>
-              <p className="text-xs text-gray-400 mt-0.5">
+              <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
                 Select an expanded package while preserving originally assigned sub-scopes &amp; designers
               </p>
             </div>
@@ -428,7 +457,7 @@ export default function UpgradeProjectModal({
           <button
             onClick={onClose}
             disabled={isSubmitting}
-            className="text-gray-400 hover:text-white transition-colors p-1.5 rounded-lg hover:bg-[#2A2A2A]"
+            className="text-gray-400 hover:text-gray-900 dark:hover:text-white transition-colors p-1.5 rounded-lg hover:bg-gray-100 dark:hover:bg-[#2A2A2A]"
             aria-label="Close modal"
           >
             <X className="w-5 h-5" />
@@ -436,32 +465,32 @@ export default function UpgradeProjectModal({
         </div>
 
         {/* Modal Body */}
-        <div className="p-5 sm:p-6 space-y-5 overflow-y-auto flex-1 bg-[#141414]">
+        <div className="p-5 sm:p-6 space-y-5 overflow-y-auto flex-1 bg-white dark:bg-[#141414]">
           {errorMsg && (
-            <div className="p-3.5 bg-rose-500/10 text-rose-400 rounded-xl flex items-start gap-2.5 border border-rose-500/30 text-sm">
-              <AlertCircle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
+            <div className="p-3.5 bg-rose-500/10 text-rose-600 dark:text-rose-400 rounded-xl flex items-start gap-2.5 border border-rose-500/30 text-sm">
+              <AlertCircle className="w-5 h-5 text-rose-500 shrink-0 mt-0.5" />
               <span className="font-medium">{errorMsg}</span>
             </div>
           )}
 
           {/* Project Snapshot Card */}
-          <div className="p-4 rounded-xl bg-[#1C1C1C] border border-[#2D2D2D] grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+          <div className="p-4 rounded-xl bg-gray-50 dark:bg-[#1C1C1C] border border-gray-200 dark:border-[#2D2D2D] grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
             <div className="flex items-center gap-2.5">
-              <Building2 className="w-4 h-4 text-[#D4AF37] shrink-0" />
+              <Building2 className="w-4 h-4 text-amber-600 dark:text-[#D4AF37] shrink-0" />
               <div className="truncate">
-                <span className="text-[11px] text-gray-400 uppercase font-bold tracking-wider block">Project &amp; Client</span>
-                <span className="font-semibold text-white truncate block">{project.projectName}</span>
-                <span className="text-xs text-gray-300">Client: {project.clientName}</span>
+                <span className="text-[11px] text-gray-500 dark:text-gray-400 uppercase font-bold tracking-wider block">Project &amp; Client</span>
+                <span className="font-semibold text-gray-900 dark:text-white truncate block">{project.projectName}</span>
+                <span className="text-xs text-gray-600 dark:text-gray-300">Client: {project.clientName}</span>
               </div>
             </div>
 
             <div className="flex items-center gap-2.5">
-              <MapPin className="w-4 h-4 text-[#D4AF37] shrink-0" />
+              <MapPin className="w-4 h-4 text-amber-600 dark:text-[#D4AF37] shrink-0" />
               <div className="truncate">
-                <span className="text-[11px] text-gray-400 uppercase font-bold tracking-wider block">Site Location &amp; Capacity</span>
-                <span className="font-semibold text-white truncate block">{project.location || "N/A"}</span>
-                {project.plantCapacity && (
-                  <span className="text-xs text-amber-400 font-mono">
+                <span className="text-[11px] text-gray-500 dark:text-gray-400 uppercase font-bold tracking-wider block">Site Location &amp; Capacity</span>
+                <span className="font-semibold text-gray-900 dark:text-white truncate block">{project.location || "N/A"}</span>
+                {(project.plantCapacity !== null && project.plantCapacity !== undefined && project.plantCapacity !== "") && (
+                  <span className="text-xs text-amber-600 dark:text-amber-400 font-mono">
                     {project.plantCapacity} {project.capacityUnit || "KW"}
                   </span>
                 )}
@@ -470,10 +499,10 @@ export default function UpgradeProjectModal({
           </div>
 
           {/* Current Registered Package Badge */}
-          <div className="p-3 rounded-xl bg-[#1A1A1A] border border-[#2D2D2D] flex items-center justify-between text-xs">
+          <div className="p-3 rounded-xl bg-gray-50 dark:bg-[#1A1A1A] border border-gray-200 dark:border-[#2D2D2D] flex items-center justify-between text-xs">
             <div className="flex items-center gap-2">
-              <span className="text-gray-400">Current Scope of Work:</span>
-              <span className="px-2.5 py-0.5 rounded-full bg-amber-500/10 text-amber-300 border border-amber-500/30 font-semibold">
+              <span className="text-gray-600 dark:text-gray-400">Current Scope of Work:</span>
+              <span className="px-2.5 py-0.5 rounded-full bg-amber-100 dark:bg-amber-500/10 text-amber-800 dark:text-amber-300 border border-amber-300 dark:border-amber-500/30 font-semibold">
                 {currentProjectScope}
               </span>
             </div>
@@ -486,18 +515,18 @@ export default function UpgradeProjectModal({
           <div className="space-y-2">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <ShieldCheck className="w-4 h-4 text-emerald-400" />
-                <h3 className="text-sm font-bold text-gray-200">
+                <ShieldCheck className="w-4 h-4 text-emerald-500 dark:text-emerald-400" />
+                <h3 className="text-sm font-bold text-gray-800 dark:text-gray-200">
                   Original Scope History ({historicalScopes.length})
                 </h3>
               </div>
-              <span className="text-[11px] text-emerald-400 font-medium flex items-center gap-1">
+              <span className="text-[11px] text-emerald-600 dark:text-emerald-400 font-medium flex items-center gap-1">
                 <Lock className="w-3 h-3" /> Preserved from Original Entry
               </span>
             </div>
 
             {historicalScopes.length === 0 ? (
-              <div className="p-3 text-xs text-gray-500 bg-[#1C1C1C] rounded-lg border border-[#2A2A2A] italic">
+              <div className="p-3 text-xs text-gray-500 bg-gray-50 dark:bg-[#1C1C1C] rounded-lg border border-gray-200 dark:border-[#2A2A2A] italic">
                 Initial scope: {currentProjectScope}
               </div>
             ) : (
@@ -505,20 +534,20 @@ export default function UpgradeProjectModal({
                 {historicalScopes.map(scope => (
                   <div
                     key={scope.key}
-                    className="p-3 rounded-xl bg-[#191F1A] border border-emerald-500/30 flex items-center justify-between gap-2"
+                    className="p-3 rounded-xl bg-emerald-50/70 dark:bg-[#191F1A] border border-emerald-500/30 flex items-center justify-between gap-2"
                   >
                     <div className="min-w-0">
                       <div className="flex items-center gap-1.5">
-                        <Lock className="w-3 h-3 text-emerald-400 shrink-0" />
-                        <span className="font-semibold text-xs sm:text-sm text-gray-200 truncate">{scope.label}</span>
+                        <Lock className="w-3 h-3 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                        <span className="font-semibold text-xs sm:text-sm text-gray-800 dark:text-gray-200 truncate">{scope.label}</span>
                       </div>
-                      <p className="text-xs text-gray-400 mt-1 flex items-center gap-1 truncate">
-                        <UserCheck className="w-3 h-3 text-emerald-400/80 shrink-0" />
-                        <span className="truncate text-gray-300">{scope.designerName}</span>
-                        <span className="text-[10px] text-gray-400 truncate">({scope.designerEmail})</span>
+                      <p className="text-xs text-gray-600 dark:text-gray-400 mt-1 flex items-center gap-1 truncate">
+                        <UserCheck className="w-3 h-3 text-emerald-600 dark:text-emerald-400/80 shrink-0" />
+                        <span className="truncate text-gray-700 dark:text-gray-300">{scope.designerName}</span>
+                        <span className="text-[10px] text-gray-500 dark:text-gray-400 truncate">({scope.designerEmail})</span>
                       </p>
                     </div>
-                    <span className="text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shrink-0">
+                    <span className="text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded bg-emerald-100 dark:bg-emerald-500/20 text-emerald-800 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-500/40 shrink-0">
                       Active
                     </span>
                   </div>
@@ -528,22 +557,22 @@ export default function UpgradeProjectModal({
           </div>
 
           {/* 2. Upgrade Scope of Work / Package Section */}
-          <div className="space-y-3 pt-4 border-t border-[#262626]">
+          <div className="space-y-3 pt-4 border-t border-gray-200 dark:border-[#262626]">
             <div>
               <div className="flex items-center gap-2">
-                <Layers className="w-4 h-4 text-[#D4AF37]" />
-                <h3 className="text-sm sm:text-base font-bold text-[#D4AF37]">
+                <Layers className="w-4 h-4 text-amber-600 dark:text-[#D4AF37]" />
+                <h3 className="text-sm sm:text-base font-bold text-gray-900 dark:text-[#D4AF37]">
                   Upgrade Scope of Work / Package
                 </h3>
               </div>
-              <p className="text-xs text-gray-400 mt-0.5">
+              <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
                 Select a target package from the registered scope repository. When a combined package is selected, each sub-scope will be deconstructed with individual designer assignments.
               </p>
             </div>
 
             {/* Target Scope Dropdown */}
             <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-gray-300 block">
+              <label className="text-xs font-semibold text-gray-700 dark:text-gray-300 block">
                 Target Scope of Work / Package *
               </label>
               <select
@@ -553,9 +582,9 @@ export default function UpgradeProjectModal({
                   setNewlyAssignedDesigners({});
                   setErrorMsg("");
                 }}
-                className="w-full p-2.5 rounded-lg text-sm bg-[#1E1E1E] border border-[#3A3A3A] text-white focus:ring-2 focus:ring-[#D4AF37] focus:border-[#D4AF37] outline-none"
+                className="w-full p-2.5 rounded-lg text-sm bg-gray-50 dark:bg-[#1E1E1E] border border-gray-300 dark:border-[#3A3A3A] text-gray-900 dark:text-white focus:ring-2 focus:ring-[#D4AF37] focus:border-[#D4AF37] outline-none"
               >
-                <option value="">-- Select Target Package (e.g. Pre-Design + PVsyst + CEIG + IFP) --</option>
+                <option value="">-- Select Target Scope or Package --</option>
                 {availablePackages.map(pkg => (
                   <option key={pkg} value={pkg}>
                     {pkg} {pkg.toLowerCase() === currentProjectScope.toLowerCase() ? "(Current Package)" : ""}
@@ -565,7 +594,7 @@ export default function UpgradeProjectModal({
             </div>
 
             {isSamePackage && (
-              <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-xs text-amber-300 flex items-center gap-2">
+              <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-xs text-amber-800 dark:text-amber-300 flex items-center gap-2">
                 <Info className="w-4 h-4 shrink-0" />
                 <span>
                   The project is currently registered under <strong>{currentProjectScope}</strong>. Please select an upgraded or broader package to add new engineering deliverables.
@@ -577,31 +606,31 @@ export default function UpgradeProjectModal({
             {selectedTargetPackage && !isSamePackage && targetSubScopes.length > 0 && (
               <div className="space-y-3 pt-2">
                 {/* Summary header bar & Quick Assign All button */}
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-3 rounded-xl bg-[#1A1A1A] border border-[#2D2D2D]">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-3 rounded-xl bg-gray-50 dark:bg-[#1A1A1A] border border-gray-200 dark:border-[#2D2D2D]">
                   <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-xs font-semibold text-gray-200">
+                    <span className="text-xs font-semibold text-gray-700 dark:text-gray-200">
                       Component Sub-Scopes ({targetSubScopes.length}):
                     </span>
-                    <span className="px-2 py-0.5 text-[11px] rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-medium">
+                    <span className="px-2 py-0.5 text-[11px] rounded bg-emerald-100 dark:bg-emerald-500/20 text-emerald-800 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-500/30 font-medium">
                       {preservedSubScopes.length} Preserved
                     </span>
-                    <span className="px-2 py-0.5 text-[11px] rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 font-medium">
+                    <span className="px-2 py-0.5 text-[11px] rounded bg-amber-100 dark:bg-amber-500/20 text-amber-800 dark:text-amber-300 border border-amber-300 dark:border-amber-500/30 font-medium">
                       {newSubScopes.length} New
                     </span>
                   </div>
 
                   {newSubScopes.length > 1 && designMembers.length > 0 && (
-                    <div className="flex items-center gap-1.5 shrink-0 bg-[#242424] px-2.5 py-1 rounded-lg border border-[#383838]">
-                      <span className="text-[11px] font-medium text-gray-300">Quick Assign All New:</span>
+                    <div className="flex items-center gap-1.5 shrink-0 bg-white dark:bg-[#242424] px-2.5 py-1 rounded-lg border border-gray-200 dark:border-[#383838]">
+                      <span className="text-[11px] font-medium text-gray-600 dark:text-gray-300">Quick Assign All New:</span>
                       <select
                         defaultValue=""
                         onChange={(e) => handleQuickAssignAllNew(e.target.value)}
-                        className="text-xs py-0.5 px-1.5 rounded bg-[#161616] border border-[#3A3A3A] text-white focus:ring-1 focus:ring-[#D4AF37] outline-none"
+                        className="text-xs py-0.5 px-1.5 rounded bg-gray-50 dark:bg-[#161616] border border-gray-300 dark:border-[#3A3A3A] text-gray-900 dark:text-white focus:ring-1 focus:ring-[#D4AF37] outline-none"
                       >
                         <option value="" disabled>Choose Designer</option>
                         {designMembers.map(d => (
                           <option key={d.id} value={d.email}>
-                            {d.name} ({d.email})
+                            {d.displayLabel || (d.isOwner ? `${d.name} (Partner / Designer)` : `${d.name} (Designer)`)}
                           </option>
                         ))}
                       </select>
@@ -609,46 +638,46 @@ export default function UpgradeProjectModal({
                   )}
                 </div>
 
-                {/* Sub-Scopes Split Grid: Preserved sub-scopes locked, new sub-scopes with individual designer dropdown */}
+                {/* Sub-Scopes Split Grid */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
                   {targetSubScopes.map(sub => {
-                    const normalizedKey = toScopeKey(sub.key);
-                    const historicalMatch = historicalScopeMap.get(normalizedKey) || historicalScopeMap.get(toScopeKey(sub.label));
+                    const normalizedKey = toCanonicalScopeKey(sub.key);
+                    const historicalMatch = historicalScopeMap.get(normalizedKey) || historicalScopeMap.get(toCanonicalScopeKey(sub.label));
 
                     // 1. Existing Sub-Scope: Pre-filled with historical designer, locked
                     if (historicalMatch) {
                       return (
                         <div
                           key={sub.key}
-                          className="space-y-1.5 p-3.5 rounded-xl bg-[#171D18] border border-emerald-500/40 shadow-xs flex flex-col justify-between"
+                          className="space-y-1.5 p-3.5 rounded-xl bg-emerald-50/60 dark:bg-[#171D18] border border-emerald-500/40 shadow-xs flex flex-col justify-between"
                         >
                           <div className="space-y-1.5">
                             <div className="flex items-center justify-between">
-                              <span className="text-xs font-semibold uppercase tracking-wider text-emerald-400 flex items-center gap-1.5">
-                                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                              <span className="text-xs font-semibold uppercase tracking-wider text-emerald-700 dark:text-emerald-400 flex items-center gap-1.5">
+                                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
                                 {sub.label} Scope
                               </span>
-                              <span className="text-[10px] font-semibold text-emerald-300 bg-emerald-500/20 border border-emerald-500/40 px-2 py-0.5 rounded-full flex items-center gap-1 shrink-0">
+                              <span className="text-[10px] font-semibold text-emerald-800 dark:text-emerald-300 bg-emerald-100 dark:bg-emerald-500/20 border border-emerald-300 dark:border-emerald-500/40 px-2 py-0.5 rounded-full flex items-center gap-1 shrink-0">
                                 <Lock className="w-2.5 h-2.5" />
                                 Locked / Preserved
                               </span>
                             </div>
 
-                            <label className="text-xs font-medium text-gray-300 block">
+                            <label className="text-xs font-medium text-gray-600 dark:text-gray-300 block">
                               Assigned Designer (Locked)
                             </label>
                             
-                            <div className="w-full p-2 rounded-lg border border-emerald-500/30 bg-[#111712] text-gray-300 text-xs flex items-center justify-between cursor-not-allowed">
-                              <span className="font-medium text-white truncate">
+                            <div className="w-full p-2 rounded-lg border border-emerald-500/30 bg-white dark:bg-[#111712] text-gray-800 dark:text-gray-300 text-xs flex items-center justify-between cursor-not-allowed">
+                              <span className="font-medium text-gray-900 dark:text-white truncate">
                                 {historicalMatch.designerName} ({historicalMatch.designerEmail})
                               </span>
-                              <span className="text-[10px] text-emerald-400 font-mono flex items-center gap-1 shrink-0 ml-1.5">
+                              <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-mono flex items-center gap-1 shrink-0 ml-1.5">
                                 <Lock className="w-2.5 h-2.5" /> Preserved
                               </span>
                             </div>
                           </div>
 
-                          <p className="text-[10px] text-emerald-400/80 pt-1 flex items-center gap-1">
+                          <p className="text-[10px] text-emerald-600 dark:text-emerald-400/80 pt-1 flex items-center gap-1">
                             <ShieldCheck className="w-3 h-3 shrink-0" />
                             Retained from original entry · No duplicate task created
                           </p>
@@ -657,13 +686,14 @@ export default function UpgradeProjectModal({
                     }
 
                     // 2. New Sub-Scope: Individual Designer Assignment Dropdown
-                    const assignedEmail = newlyAssignedDesigners[sub.key] || "";
+                    const canonicalKey = toCanonicalScopeKey(sub.key);
+                    const assignedEmail = newlyAssignedDesigners[canonicalKey] || newlyAssignedDesigners[sub.key] || "";
                     const isAssigned = Boolean(assignedEmail);
 
                     return (
                       <div
                         key={sub.key}
-                        className={`space-y-1.5 p-3.5 rounded-xl bg-[#1C1A14] border transition-all flex flex-col justify-between ${
+                        className={`space-y-1.5 p-3.5 rounded-xl bg-amber-50/50 dark:bg-[#1C1A14] border transition-all flex flex-col justify-between ${
                           isAssigned
                             ? "border-amber-500/50 shadow-sm"
                             : "border-amber-500/80 ring-1 ring-amber-500/30"
@@ -671,36 +701,36 @@ export default function UpgradeProjectModal({
                       >
                         <div className="space-y-1.5">
                           <div className="flex items-center justify-between">
-                            <span className="text-xs font-semibold uppercase tracking-wider text-[#D4AF37] flex items-center gap-1.5">
-                              <Sparkles className="w-3.5 h-3.5 text-[#D4AF37] shrink-0" />
+                            <span className="text-xs font-semibold uppercase tracking-wider text-amber-700 dark:text-[#D4AF37] flex items-center gap-1.5">
+                              <Sparkles className="w-3.5 h-3.5 text-amber-600 dark:text-[#D4AF37] shrink-0" />
                               {sub.label} Scope
                             </span>
-                            <span className="text-[10px] font-semibold text-amber-300 bg-amber-500/20 border border-amber-500/40 px-2 py-0.5 rounded-full flex items-center gap-1 shrink-0">
+                            <span className="text-[10px] font-semibold text-amber-800 dark:text-amber-300 bg-amber-100 dark:bg-amber-500/20 border border-amber-300 dark:border-amber-500/40 px-2 py-0.5 rounded-full flex items-center gap-1 shrink-0">
                               <Sparkles className="w-2.5 h-2.5" />
                               New Sub-Scope
                             </span>
                           </div>
 
-                          <label className="text-xs font-medium text-gray-300 flex items-center justify-between">
+                          <label className="text-xs font-medium text-gray-700 dark:text-gray-300 flex items-center justify-between">
                             <span>Assign Designer for {sub.label} *</span>
                             {!isAssigned && (
-                              <span className="text-[10px] text-amber-400 font-medium">Assignment Required</span>
+                              <span className="text-[10px] text-amber-600 dark:text-amber-400 font-medium">Assignment Required</span>
                             )}
                           </label>
 
                           <select
                             value={assignedEmail}
-                            onChange={(e) => handleDesignerChange(sub.key, e.target.value)}
-                            className={`w-full p-2 rounded-lg text-xs bg-[#141414] border ${
+                            onChange={(e) => handleDesignerChange(canonicalKey, e.target.value)}
+                            className={`w-full p-2 rounded-lg text-xs bg-white dark:bg-[#141414] border ${
                               !isAssigned
                                 ? "border-amber-500/70 focus:border-amber-400 focus:ring-1 focus:ring-amber-400"
-                                : "border-[#3A3A3A] focus:border-[#D4AF37] focus:ring-1 focus:ring-[#D4AF37]"
-                            } text-white outline-none`}
+                                : "border-gray-300 dark:border-[#3A3A3A] focus:border-[#D4AF37] focus:ring-1 focus:ring-[#D4AF37]"
+                            } text-gray-900 dark:text-white outline-none`}
                           >
                             <option value="">Select designer for {sub.label}</option>
                             {designMembers.map(d => (
                               <option key={d.id} value={d.email}>
-                                {d.name} ({d.email})
+                                {d.displayLabel || (d.isOwner ? `${d.name} (Partner / Designer)` : `${d.name} (Designer)`)}
                               </option>
                             ))}
                           </select>
@@ -708,13 +738,13 @@ export default function UpgradeProjectModal({
 
                         <div className="pt-1">
                           {isAssigned ? (
-                            <p className="text-[10px] text-emerald-400 flex items-center gap-1 truncate">
+                            <p className="text-[10px] text-emerald-600 dark:text-emerald-400 flex items-center gap-1 truncate">
                               <Check className="w-3 h-3 shrink-0" />
                               Assigned to {assignedEmail}
                             </p>
                           ) : (
-                            <p className="text-[10px] text-gray-400 flex items-center gap-1">
-                              <Users className="w-3 h-3 shrink-0 text-gray-500" />
+                            <p className="text-[10px] text-gray-500 dark:text-gray-400 flex items-center gap-1">
+                              <Users className="w-3 h-3 shrink-0 text-gray-400" />
                               Select a designer from Design department
                             </p>
                           )}
@@ -725,7 +755,7 @@ export default function UpgradeProjectModal({
                 </div>
 
                 {newSubScopes.length === 0 && preservedSubScopes.length > 0 && (
-                  <div className="p-3 rounded-lg bg-[#202020] border border-[#333333] text-xs text-amber-400/90 text-center font-medium">
+                  <div className="p-3 rounded-lg bg-gray-100 dark:bg-[#202020] border border-gray-300 dark:border-[#333333] text-xs text-amber-700 dark:text-amber-400/90 text-center font-medium">
                     All sub-scopes in this package are already registered and preserved. Choose an expanded package with additional deliverables.
                   </div>
                 )}
@@ -734,24 +764,24 @@ export default function UpgradeProjectModal({
           </div>
 
           {/* 3. Optional Project Capacity Revision & Notes */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-3 border-t border-[#262626]">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-3 border-t border-gray-200 dark:border-[#262626]">
             <div className="space-y-1">
-              <label className="text-xs font-medium text-gray-300 flex items-center gap-1.5">
-                <Zap className="w-3.5 h-3.5 text-[#D4AF37]" />
+              <label className="text-xs font-medium text-gray-700 dark:text-gray-300 flex items-center gap-1.5">
+                <Zap className="w-3.5 h-3.5 text-amber-600 dark:text-[#D4AF37]" />
                 Revised Plant Capacity (Optional)
               </label>
               <input
                 type="number"
                 step="0.01"
-                placeholder={project.plantCapacity ? `Current: ${project.plantCapacity} KW` : "e.g. 100"}
+                placeholder={(project.plantCapacity !== null && project.plantCapacity !== undefined && project.plantCapacity !== "") ? `Current: ${project.plantCapacity} KW` : "e.g. 100"}
                 value={revisedCapacity}
                 onChange={(e) => setRevisedCapacity(e.target.value)}
-                className="w-full p-2.5 rounded-lg bg-[#202020] border border-[#333333] text-white text-sm outline-none focus:ring-1 focus:ring-[#D4AF37]"
+                className="w-full p-2.5 rounded-lg bg-gray-50 dark:bg-[#202020] border border-gray-300 dark:border-[#333333] text-gray-900 dark:text-white text-sm outline-none focus:ring-1 focus:ring-[#D4AF37]"
               />
             </div>
 
             <div className="space-y-1">
-              <label className="text-xs font-medium text-gray-300 block">
+              <label className="text-xs font-medium text-gray-700 dark:text-gray-300 block">
                 Upgrade Remarks / Scope Reason (Optional)
               </label>
               <input
@@ -759,19 +789,19 @@ export default function UpgradeProjectModal({
                 placeholder="e.g. Upgraded to full package for client request"
                 value={upgradeNotes}
                 onChange={(e) => setUpgradeNotes(e.target.value)}
-                className="w-full p-2.5 rounded-lg bg-[#202020] border border-[#333333] text-white text-sm outline-none focus:ring-1 focus:ring-[#D4AF37]"
+                className="w-full p-2.5 rounded-lg bg-gray-50 dark:bg-[#202020] border border-gray-300 dark:border-[#333333] text-gray-900 dark:text-white text-sm outline-none focus:ring-1 focus:ring-[#D4AF37]"
               />
             </div>
           </div>
         </div>
 
         {/* Modal Footer */}
-        <div className="px-5 sm:px-6 py-4 bg-[#1E1E1E] border-t border-[#2A2A2A] flex flex-col-reverse sm:flex-row justify-end gap-3">
+        <div className="px-5 sm:px-6 py-4 bg-gray-50 dark:bg-[#1E1E1E] border-t border-gray-200 dark:border-[#2A2A2A] flex flex-col-reverse sm:flex-row justify-end gap-3">
           <button
             type="button"
             onClick={onClose}
             disabled={isSubmitting}
-            className="w-full sm:w-auto px-4 py-2 text-sm font-medium text-gray-300 bg-[#262626] border border-[#3A3A3A] rounded-lg hover:bg-[#303030] hover:text-white transition-colors"
+            className="w-full sm:w-auto px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-[#262626] border border-gray-300 dark:border-[#3A3A3A] rounded-lg hover:bg-gray-100 dark:hover:bg-[#303030] hover:text-gray-900 dark:hover:text-white transition-colors"
           >
             Cancel
           </button>

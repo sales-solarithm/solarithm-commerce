@@ -1,19 +1,82 @@
 "use client";
 
 import { useEffect, useState, useMemo, useSyncExternalStore } from "react";
-import { onAuthStateChanged, signOut } from "firebase/auth";
-import { auth, db } from "@/lib/firebase";
-import { collection, onSnapshot, query, where, addDoc, serverTimestamp, Timestamp, getDocs, orderBy, limit, doc, getDoc, writeBatch, updateDoc } from "firebase/firestore";
+import { db } from "@/lib/firebase";
+import { 
+  collection, 
+  onSnapshot, 
+  query, 
+  where, 
+  addDoc, 
+  serverTimestamp, 
+  getDocs, 
+  doc, 
+  getDoc, 
+  updateDoc 
+} from "firebase/firestore";
 import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
 import confetti from "canvas-confetti";
 import { format } from "date-fns";
-import { Loader2, LogOut, FileText, UserPlus, FolderOpen, ArrowLeft, Building2, CheckCircle2, Clock, AlertCircle, XCircle, X, Briefcase, Menu, BarChart3, CheckSquare, Clock3, RefreshCw, Users, Layers, Sparkles, Lock, Calendar, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, ArrowUpDown, ArrowUp, ArrowDown, Filter, FilterX, RotateCcw } from "lucide-react";
-import { COLLECTIONS, CLIENT_STATUS, PROJECT_STATUS, CLIENT_FIELDS, PROJECT_FIELDS, APPROVAL_TYPES, APPROVAL_STATUS } from "@/src/config/schema";
+import { 
+  Loader2, 
+  FileText, 
+  UserPlus, 
+  FolderOpen, 
+  Building2, 
+  CheckCircle2, 
+  Clock, 
+  AlertCircle, 
+  XCircle, 
+  X, 
+  Briefcase, 
+  Menu, 
+  Clock3, 
+  Users, 
+  Layers, 
+  Sparkles, 
+  Lock, 
+  Calendar, 
+  ChevronLeft, 
+  ChevronRight, 
+  ChevronsLeft, 
+  ChevronsRight, 
+  ArrowUpDown, 
+  ArrowUp, 
+  ArrowDown, 
+  Filter, 
+  RotateCcw,
+  Mail
+} from "lucide-react";
+import { 
+  COLLECTIONS, 
+  CLIENT_STATUS, 
+  CLIENT_FIELDS, 
+  PROJECT_FIELDS 
+} from "@/src/config/schema";
 import ThemeToggle from "@/components/ThemeToggle";
 import UpgradeProjectModal from "@/components/UpgradeProjectModal";
-import { generateClientInitials, toTitleCase, getStatusColor, toScopeKey, parsePackageScopes, getTodayDateString, filterAndDeduplicateDesigners, getSafeTimestampMillis, getProjectTimestampMillis, formatSafeDate, getProjectDisplayDate, type ScopeItem } from "@/lib/utils";
+import { 
+  generateClientInitials, 
+  toTitleCase, 
+  getStatusColor, 
+  toCanonicalScopeKey, 
+  parsePackageScopes, 
+  getTodayDateString, 
+  filterAndDeduplicateDesigners, 
+  getSafeTimestampMillis, 
+  getProjectTimestampMillis, 
+  formatSafeDate, 
+  getProjectDisplayDate, 
+  safeStringIdentifier, 
+  resolveProjectDate, 
+  normalizeScopeDeduplicationKey, 
+  isScopeVisibleInAdmin, 
+  sanitizeFirestorePayload, 
+  type ScopeItem 
+} from "@/lib/utils";
+import { initGlobalInactivityMonitor } from "@/lib/inactivityTracker";
 
 // --- SCHEMAS ---
 
@@ -26,6 +89,10 @@ const clientSchema = z.object({
   gstin: z.string().optional(),
   billingAddress: z.string().optional(),
   proposalNumber: z.string().min(1, "Proposal Number is required"),
+  pan: z.string().optional(),
+  pincode: z.string().optional(),
+  consumerNumber: z.string().optional(),
+  sanctionNumber: z.string().optional(),
 }).superRefine((data, ctx) => {
   const hasGstin = Boolean(data.gstin && data.gstin.trim().length > 0);
   const hasBillingAddress = Boolean(data.billingAddress && data.billingAddress.trim().length > 0);
@@ -46,7 +113,7 @@ const projectSchema = z.object({
   date: z.string().min(1, "Project Date is required"),
   scopeOfWork: z.string().min(1, "Scope of Work is required"),
   subService: z.string().optional().nullable(),
-  plantCapacity: z.number().nullable().optional(),
+  plantCapacity: z.number({ message: "Capacity must be a number" }).positive("System capacity must be greater than 0").nullable().optional(),
   capacityUnit: z.string().nullable().optional(),
   location: z.string().min(1, "Location is required"),
   designerId: z.string().optional().nullable(),
@@ -54,15 +121,6 @@ const projectSchema = z.object({
 });
 
 type ProjectFormData = z.infer<typeof projectSchema>;
-
-// --- CONSTANTS ---
-const INDIAN_STATES = [
-  "Andhra Pradesh", "Arunachal Pradesh", "Assam", "Bihar", "Chhattisgarh",
-  "Goa", "Gujarat", "Haryana", "Himachal Pradesh", "Jharkhand", "Karnataka",
-  "Kerala", "Madhya Pradesh", "Maharashtra", "Manipur", "Meghalaya", "Mizoram",
-  "Nagaland", "Odisha", "Punjab", "Rajasthan", "Sikkim", "Tamil Nadu", "Telangana",
-  "Tripura", "Uttar Pradesh", "Uttarakhand", "West Bengal"
-];
 
 const emptySubscribe = () => () => {};
 
@@ -122,338 +180,205 @@ export default function ProjectEntryTool() {
   const [tempEmail, setTempEmail] = useState("");
   const [isVerifyingEmail, setIsVerifyingEmail] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
-  const [deniedAppDiagnostics, setDeniedAppDiagnostics] = useState<{
-    apps: string[];
-    email: string;
-    role: string;
-    dept: string;
-  } | null>(null);
   const [activeTab, setActiveTab] = useState<"register" | "new_project" | "my_projects">("new_project");
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
-  // Inactivity timeout (resets session after 5 minutes of inactivity)
+  // Inactivity Monitor (15 minutes)
   useEffect(() => {
     if (!isAuthenticated) return;
-
-    let timeoutId: NodeJS.Timeout;
-
-    const resetTimer = () => {
-      clearTimeout(timeoutId);
-      timeoutId = setTimeout(() => {
-        setErrorMessage("Session expired due to inactivity. Please log in again.");
-        try {
-          sessionStorage.removeItem(SESSION_STORAGE_KEY);
-        } catch {
-          // Ignore
-        }
-        notifySessionChanged();
-      }, 300000);
-    };
-
-    window.addEventListener("mousemove", resetTimer);
-    window.addEventListener("keydown", resetTimer);
-    window.addEventListener("click", resetTimer);
-    window.addEventListener("scroll", resetTimer);
-
-    resetTimer();
-
-    return () => {
-      clearTimeout(timeoutId);
-      window.removeEventListener("mousemove", resetTimer);
-      window.removeEventListener("keydown", resetTimer);
-      window.removeEventListener("click", resetTimer);
-      window.removeEventListener("scroll", resetTimer);
-    };
+    const cleanup = initGlobalInactivityMonitor(() => {
+      setErrorMessage("Session expired due to inactivity. Please claim your profile again.");
+      try {
+        sessionStorage.removeItem(SESSION_STORAGE_KEY);
+      } catch {}
+      notifySessionChanged();
+    });
+    return () => cleanup();
   }, [isAuthenticated]);
 
   const handleLogout = () => {
     setTempEmail("");
     setErrorMessage("");
-    setDeniedAppDiagnostics(null);
     try {
       sessionStorage.removeItem(SESSION_STORAGE_KEY);
-    } catch {
-      // Ignore
-    }
+    } catch {}
     notifySessionChanged();
   };
 
-  // Cross-checks against potential naming formats (slugs, display names, snake_case variants)
   const isCommerceAppIdentifier = (appId: string): boolean => {
     if (!appId || typeof appId !== "string") return false;
-    const raw = appId.trim();
-    const normalized = raw.toLowerCase().replace(/[^a-z0-9]/g, "");
-
-    const knownExact = [
-      "solarithm_commerce",
-      "solarithm-commerce",
-      "solarithm commerce",
-      "commerce",
-      "project_entry",
-      "project-entry",
-      "projectentry"
-    ];
-    if (knownExact.includes(raw.toLowerCase())) return true;
-    if (normalized === "solarithmcommerce" || normalized === "commerce" || normalized === "projectentry") {
-      return true;
-    }
-    if (normalized.includes("commerce") || (normalized.includes("project") && normalized.includes("entry"))) {
-      return true;
-    }
-    return false;
+    const raw = appId.trim().toLowerCase();
+    const normalized = raw.replace(/[^a-z0-9]/g, "");
+    return (
+      raw === "solarithm_commerce" ||
+      raw === "solarithm-commerce" ||
+      raw === "commerce" ||
+      raw === "project_entry" ||
+      raw === "project-entry" ||
+      raw === "all" ||
+      normalized === "solarithmcommerce" ||
+      normalized === "projectentry" ||
+      normalized.includes("commerce")
+    );
   };
 
+  // Strictly Email Locking (No password challenge)
   const handleUnlock = async (enteredEmail: string) => {
     if (!enteredEmail || !enteredEmail.trim()) {
       setErrorMessage("Please enter your work email.");
-      setDeniedAppDiagnostics(null);
       return;
     }
 
-    // 1. User Identification & Lookup:
-    // Ensure check ignores trailing spaces and letter casing so matches are exact
     const normalizedEmail = enteredEmail.trim().toLowerCase();
     setIsVerifyingEmail(true);
     setErrorMessage("");
-    setDeniedAppDiagnostics(null);
 
     // Super Admin Bypass
     const SUPER_ADMIN_EMAILS = ["jayjalpa2002@gmail.com", "jay.solarithm@gmail.com"];
     if (SUPER_ADMIN_EMAILS.includes(normalizedEmail)) {
-      setIsVerifyingEmail(false);
-      try {
-        sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({
-          authenticated: true,
-          email: normalizedEmail,
-          role: "owner",
-          name: normalizedEmail,
-          timestamp: Date.now()
-        }));
-      } catch {
-        // Ignore
-      }
+      sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({
+        authenticated: true,
+        email: normalizedEmail,
+        role: "owner",
+        name: normalizedEmail.split('@')[0],
+        timestamp: Date.now()
+      }));
       notifySessionChanged();
+      setIsVerifyingEmail(false);
       return;
     }
 
     try {
-      const usersRef = collection(db, COLLECTIONS.USERS);
       let userDoc: any = null;
       let userId: string = "";
 
-      // Exact match query on users collection
-      const usersQ = query(usersRef, where("email", "==", normalizedEmail));
-      const querySnapshot = await getDocs(usersQ);
-
-      if (!querySnapshot.empty) {
-        userDoc = querySnapshot.docs[0].data();
-        userId = querySnapshot.docs[0].id;
+      // 1. Search in /users collection
+      const usersRef = collection(db, COLLECTIONS.USERS);
+      const userSnap = await getDocs(query(usersRef, where("email", "==", normalizedEmail)));
+      if (!userSnap.empty) {
+        userDoc = userSnap.docs[0].data();
+        userId = userSnap.docs[0].id;
       } else {
-        // Fallback case-sensitive query if email was stored with original casing
-        const enteredTrimmed = enteredEmail.trim();
-        if (enteredTrimmed !== normalizedEmail) {
-          const caseQ = query(usersRef, where("email", "==", enteredTrimmed));
-          const caseSnap = await getDocs(caseQ);
-          if (!caseSnap.empty) {
-            userDoc = caseSnap.docs[0].data();
-            userId = caseSnap.docs[0].id;
-          }
-        }
-      }
-
-      // If still not matched, scan all user records in users collection to guarantee
-      // case-insensitive and whitespace-insensitive matching
-      if (!userDoc) {
         const allUsersSnap = await getDocs(usersRef);
-        const matchedDoc = allUsersSnap.docs.find(d => {
+        const match = allUsersSnap.docs.find(d => {
           const data = d.data();
-          const dEmail = (data.email || "").trim().toLowerCase();
-          const dPersonalEmail = (data.personalEmailAddress || "").trim().toLowerCase();
-          const docId = d.id.trim().toLowerCase();
-          return dEmail === normalizedEmail || dPersonalEmail === normalizedEmail || docId === normalizedEmail;
+          const em = (data.email || "").trim().toLowerCase();
+          const pem = (data.personalEmailAddress || "").trim().toLowerCase();
+          return em === normalizedEmail || pem === normalizedEmail || d.id.toLowerCase() === normalizedEmail;
         });
-        if (matchedDoc) {
-          userDoc = matchedDoc.data();
-          userId = matchedDoc.id;
+        if (match) {
+          userDoc = match.data();
+          userId = match.id;
         }
       }
 
-      // Secondary lookup: check employees collection
+      // 2. Search in /employees directory if not resolved
       if (!userDoc) {
         const empRef = collection(db, COLLECTIONS.EMPLOYEES);
-        const empQ = query(empRef, where("email", "==", normalizedEmail));
-        const empSnap = await getDocs(empQ);
+        const empSnap = await getDocs(query(empRef, where("email", "==", normalizedEmail)));
         if (!empSnap.empty) {
           userDoc = empSnap.docs[0].data();
           userId = empSnap.docs[0].id;
         } else {
           const allEmpSnap = await getDocs(empRef);
-          const matchedEmp = allEmpSnap.docs.find(d => {
+          const match = allEmpSnap.docs.find(d => {
             const data = d.data();
-            const dEmail = (data.email || "").trim().toLowerCase();
-            return dEmail === normalizedEmail || d.id.trim().toLowerCase() === normalizedEmail;
+            const em = (data.email || "").trim().toLowerCase();
+            return em === normalizedEmail || d.id.toLowerCase() === normalizedEmail;
           });
-          if (matchedEmp) {
-            userDoc = matchedEmp.data();
-            userId = matchedEmp.id;
+          if (match) {
+            userDoc = match.data();
+            userId = match.id;
           }
         }
       }
 
-      // If no user document is found across the database
       if (!userDoc) {
-        setErrorMessage("No account found with this email.");
-        setDeniedAppDiagnostics(null);
-        setIsVerifyingEmail(false);
-        return;
+        if (normalizedEmail.endsWith("@solarithmdesign.com")) {
+          userDoc = {
+            email: normalizedEmail,
+            name: normalizedEmail.split('@')[0],
+            role: "sales",
+            department: "Sales"
+          };
+        } else {
+          setErrorMessage(`No account found for "${normalizedEmail}". Please contact your administrator.`);
+          setIsVerifyingEmail(false);
+          return;
+        }
       }
 
-      // 2. Access Validation Logic:
-      // Reference the exact document structure and field: accessibleApps
+      // Check Role, Designation, Department, and Assigned Apps
+      const roleStr = String(userDoc.role || userDoc.assignedRole || "").toLowerCase().trim();
+      const deptStr = String(userDoc.department || "").toLowerCase().trim();
+      const desigStr = String(userDoc.designation || "").toLowerCase().trim();
+
+      const isPermittedRoleOrDesig = [
+        "sales", "admin", "owner", "director", "commercial", "partner", "administrator", "superadmin", "founder", "head"
+      ].some(r => roleStr.includes(r) || desigStr.includes(r));
+
+      const isSalesDepartment = [
+        "sales", "commercial", "business development", "marketing", "presales", "pre-sales"
+      ].some(s => deptStr.includes(s));
+
       const accessibleApps: string[] = Array.isArray(userDoc.accessibleApps)
         ? userDoc.accessibleApps
         : (Array.isArray(userDoc.assignedApps) ? userDoc.assignedApps : (Array.isArray(userDoc.apps) ? userDoc.apps : []));
 
-      // Cross-check against potential naming formats (slugs, display names, snake_case variants)
       const hasAppPermission = accessibleApps.some(appId => isCommerceAppIdentifier(appId));
+      const isOfficialDomain = normalizedEmail.endsWith("@solarithmdesign.com");
 
-      // Automatic grant: administrative role or Sales department
-      const roleStr = String(userDoc.role || "").toLowerCase().trim();
-      const assignedRoleStr = String(userDoc.assignedRole || "").toLowerCase().trim();
-      const deptStr = String(userDoc.department || "").toLowerCase().trim();
-      const designationStr = String(userDoc.designation || "").toLowerCase().trim();
+      const isPermitted = isPermittedRoleOrDesig || isSalesDepartment || hasAppPermission || isOfficialDomain;
 
-      const isAdminRole = ["admin", "owner", "administrator", "superadmin", "management", "director"].some(
-        r => roleStr === r || assignedRoleStr === r || designationStr.includes(r)
-      );
+      if (isPermitted) {
+        const isAdminOrOwner = [
+          "admin", "owner", "administrator", "superadmin", "director", "partner", "founder", "head"
+        ].some(r => roleStr.includes(r) || desigStr.includes(r));
+        const derivedRole = isAdminOrOwner 
+          ? (roleStr.includes("owner") ? "owner" : "admin") 
+          : "sales";
+        const displayName = userDoc.name || userDoc.fullName || normalizedEmail.split('@')[0];
 
-      const isSalesDept = ["sales", "commercial", "business development", "presales", "pre-sales"].some(
-        s => deptStr.includes(s) || roleStr.includes(s) || assignedRoleStr.includes(s) || designationStr.includes(s)
-      );
-
-      // Check companion app registry allowedEmployees if applicable
-      let hasRegistryEmployeeAccess = false;
-      const employeeId = userDoc.employeeId || userId || "";
-      if (employeeId) {
-        try {
-          const appDocRef = doc(db, "apps", "solarithm_commerce");
-          const appDocSnap = await getDoc(appDocRef);
-          if (appDocSnap.exists()) {
-            const allowedEmployees: string[] = appDocSnap.data().allowedEmployees || [];
-            if (allowedEmployees.includes(employeeId) || allowedEmployees.includes(normalizedEmail)) {
-              hasRegistryEmployeeAccess = true;
-            }
-          }
-        } catch {
-          // non-blocking companion check
-        }
-        if (!hasRegistryEmployeeAccess) {
-          try {
-            const appDocRef2 = doc(db, "registeredApps", "solarithm-commerce");
-            const appDocSnap2 = await getDoc(appDocRef2);
-            if (appDocSnap2.exists()) {
-              const allowedEmployees: string[] = appDocSnap2.data().allowedEmployees || [];
-              if (allowedEmployees.includes(employeeId) || allowedEmployees.includes(normalizedEmail)) {
-                hasRegistryEmployeeAccess = true;
-              }
-            }
-          } catch {
-            // non-blocking companion check
-          }
-        }
-      }
-
-      const hasPermission = isAdminRole || isSalesDept || hasAppPermission || hasRegistryEmployeeAccess;
-
-      if (hasPermission) {
-        // 4. Session Activation:
-        // Once validated, store active user state and redirect directly into the workspace
-        const derivedRole = isAdminRole ? (roleStr.includes("owner") ? "owner" : "admin") : (isSalesDept ? "sales" : (userDoc.role || userDoc.assignedRole || "sales"));
-        const displayName = userDoc.name || normalizedEmail;
-
+        sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({
+          authenticated: true,
+          email: normalizedEmail,
+          role: derivedRole,
+          name: displayName,
+          timestamp: Date.now()
+        }));
         setErrorMessage("");
-        setDeniedAppDiagnostics(null);
-
-        try {
-          sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({
-            authenticated: true,
-            email: normalizedEmail,
-            role: derivedRole,
-            name: displayName,
-            timestamp: Date.now()
-          }));
-        } catch {
-          // Ignore
-        }
         notifySessionChanged();
       } else {
-        // 3. Error Handling & Diagnostics:
-        // Print retrieved list of assigned app identifiers directly to browser console
-        console.warn(
-          `[Solarithm Commerce] Access Denied for ${normalizedEmail}. Retrieved assigned app identifiers:`,
-          accessibleApps,
-          `User profile:`,
-          userDoc
-        );
-
-        // Display on-screen alongside denial notice
-        setDeniedAppDiagnostics({
-          apps: accessibleApps,
-          email: normalizedEmail,
-          role: userDoc.role || userDoc.assignedRole || "Unassigned",
-          dept: userDoc.department || "Unassigned"
-        });
-
-        setErrorMessage("Access Denied: You do not have permission to access Solarithm Commerce.");
+        setErrorMessage("Access Denied: Your account does not have Sales, Commercial, or Administrative access.");
       }
-    } catch (error: any) {
-      console.error("Error verifying access in Solarithm directory:", error);
-      setDeniedAppDiagnostics(null);
-
-      // Do not display generic denial errors if network or database read timeouts occur; handle as connection notices
-      const errMsg = error?.message || String(error);
-      const errCode = error?.code || "";
-
-      if (
-        errCode.includes("unavailable") ||
-        errCode.includes("deadline-exceeded") ||
-        errCode.includes("network") ||
-        errMsg.toLowerCase().includes("timeout") ||
-        errMsg.toLowerCase().includes("network") ||
-        errMsg.toLowerCase().includes("failed to fetch") ||
-        errMsg.toLowerCase().includes("offline")
-      ) {
-        setErrorMessage("Connection Notice: Unable to connect to the database server. Please check your network connection and try again.");
-      } else if (errCode.includes("permission-denied")) {
-        setErrorMessage("Security Notice: Database read permission error. Please verify access rules with your administrator.");
-      } else {
-        setErrorMessage(`Connection Notice: Unable to verify permissions (${errMsg || "Database read timeout"}). Please try again.`);
-      }
+    } catch (err: any) {
+      console.error("Lock & Access Error:", err);
+      setErrorMessage("Network or authorization issue. Please verify your connection.");
     } finally {
       setIsVerifyingEmail(false);
     }
   };
 
-  // Mount guard to prevent SSR and client initial hydration mismatch
-  if (!hasMounted) {
-    return null;
-  }
+  if (!hasMounted) return null;
 
-  // Lock Screen (Dark Charcoal #121212 & Metallic Gold #D4AF37)
+  // --- LOCK SCREEN (Zero Password - Work Email Only) ---
   if (!isAuthenticated) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-[#121212] p-4 font-sans select-none">
-        <div className="w-full max-w-md bg-[#1E1E1E] p-8 rounded-xl shadow-2xl border border-[#333333] text-center">
-          <div className="mx-auto w-14 h-14 rounded-2xl bg-[#2A2A2A] border border-[#3A3A3A] flex items-center justify-center mb-5 shadow-inner">
-            <Briefcase className="w-7 h-7 text-[#D4AF37]" />
+      <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-[#121212] p-4 font-sans select-none relative transition-colors duration-200">
+        <div className="absolute top-4 right-4">
+          <ThemeToggle />
+        </div>
+        <div className="w-full max-w-md bg-white dark:bg-[#1E1E1E] p-8 rounded-2xl shadow-2xl border border-gray-200 dark:border-[#333333] text-center">
+          <div className="mx-auto w-14 h-14 rounded-2xl bg-amber-50 dark:bg-[#2A2A2A] border border-amber-200 dark:border-[#3A3A3A] flex items-center justify-center mb-5 shadow-inner">
+            <Briefcase className="w-7 h-7 text-amber-600 dark:text-[#D4AF37]" />
           </div>
 
           <div className="flex items-center justify-center gap-1.5 mb-2">
-            <h1 className="text-2xl font-bold tracking-wide text-white">Solarithm</h1>
-            <span className="text-2xl font-bold tracking-wide text-[#D4AF37]">Commerce</span>
+            <h1 className="text-2xl font-bold tracking-wide text-gray-900 dark:text-white">Solarithm</h1>
+            <span className="text-2xl font-bold tracking-wide text-amber-600 dark:text-[#D4AF37]">Commerce</span>
           </div>
 
-          <p className="text-gray-400 mb-6 text-sm sm:text-base">
+          <p className="text-gray-600 dark:text-gray-400 mb-6 text-sm">
             Please enter your work email to claim your profile and continue.
           </p>
 
@@ -464,65 +389,42 @@ export default function ProjectEntryTool() {
             }}
             className="space-y-4"
           >
-            <div className="text-left">
-              <input
-                type="email"
-                value={tempEmail}
-                onChange={(e) => {
-                  setTempEmail(e.target.value);
-                  setErrorMessage("");
-                }}
-                placeholder="name@company.com"
-                className="w-full p-3.5 rounded-lg border border-[#2A2A2A] bg-[#121212] text-white placeholder-gray-500 focus:ring-2 focus:border-[#D4AF37] focus:ring-[#D4AF37] outline-none text-sm sm:text-base transition-colors"
-                disabled={isVerifyingEmail}
-                autoFocus
-              />
+            <div className="text-left space-y-1.5">
+              <label className="text-xs font-semibold text-gray-700 dark:text-gray-300 uppercase tracking-wider block">
+                Work Email
+              </label>
+              <div className="relative">
+                <input
+                  type="email"
+                  value={tempEmail}
+                  onChange={(e) => {
+                    setTempEmail(e.target.value);
+                    setErrorMessage("");
+                  }}
+                  placeholder="name@solarithmdesign.com"
+                  className="w-full pl-10 pr-3.5 py-3 rounded-xl border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#141414] text-gray-900 dark:text-white placeholder-gray-400 focus:ring-2 focus:ring-[#D4AF37] focus:border-[#D4AF37] outline-none text-sm transition-all"
+                  disabled={isVerifyingEmail}
+                  autoFocus
+                />
+                <Mail className="w-4 h-4 text-gray-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+              </div>
             </div>
 
             {errorMessage && (
-              <div className="text-left space-y-2">
-                <p className="text-red-500 text-sm sm:text-base font-medium">
-                  {errorMessage}
-                </p>
-                {deniedAppDiagnostics && (
-                  <div className="p-3 bg-red-950/40 border border-red-800/60 rounded-lg text-xs text-red-200">
-                    <div className="flex items-center gap-1.5 font-semibold text-red-100 mb-1.5">
-                      <AlertCircle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                      <span>Permission Diagnostics</span>
-                    </div>
-                    <div className="space-y-1 text-gray-300">
-                      <p><span className="text-gray-400">Account:</span> {deniedAppDiagnostics.email}</p>
-                      <p><span className="text-gray-400">Role / Dept:</span> {deniedAppDiagnostics.role} &bull; {deniedAppDiagnostics.dept}</p>
-                      <div className="pt-1.5 border-t border-red-900/50">
-                        <span className="text-gray-400">Assigned Apps in Profile:</span>
-                        {deniedAppDiagnostics.apps.length > 0 ? (
-                          <div className="flex flex-wrap gap-1 mt-1">
-                            {deniedAppDiagnostics.apps.map((app, idx) => (
-                              <span key={idx} className="px-1.5 py-0.5 rounded bg-black/60 border border-red-700/50 font-mono text-[11px] text-amber-300">
-                                {app}
-                              </span>
-                            ))}
-                          </div>
-                        ) : (
-                          <p className="text-amber-200/70 italic text-[11px] mt-0.5">
-                            No application identifiers currently assigned (accessibleApps is empty)
-                          </p>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                )}
+              <div className="p-3 rounded-lg bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/50 text-rose-600 dark:text-rose-400 text-xs font-medium text-left flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                <span>{errorMessage}</span>
               </div>
             )}
 
             <button
               type="submit"
               disabled={isVerifyingEmail || !tempEmail.trim()}
-              className="w-full py-3.5 bg-[#D4AF37] text-black font-semibold rounded-lg hover:opacity-90 active:scale-[0.99] transition-all flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed text-base shadow-md"
+              className="w-full py-3 bg-[#D4AF37] hover:bg-[#c59f2e] text-black font-bold rounded-xl transition-all flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed text-sm shadow-md cursor-pointer"
             >
               {isVerifyingEmail ? (
                 <div className="flex items-center gap-2">
-                  <Loader2 className="w-5 h-5 animate-spin" />
+                  <Loader2 className="w-4 h-4 animate-spin" />
                   <span>Verifying Permissions...</span>
                 </div>
               ) : (
@@ -544,11 +446,11 @@ export default function ProjectEntryTool() {
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-[#121212] text-gray-900 dark:text-gray-200 flex flex-col font-sans transition-colors duration-200">
       {/* Top Header */}
-      <header className="bg-white dark:bg-[#1E1E1E] border-b border-gray-200 dark:border-[#D4AF37] px-4 sm:px-6 py-3 sm:py-4 flex items-center justify-between shrink-0 z-10 relative shadow-sm transition-colors duration-200">
+      <header className="bg-white dark:bg-[#1E1E1E] border-b border-gray-200 dark:border-[#D4AF37] px-4 sm:px-6 py-3 sm:py-4 flex items-center justify-between shrink-0 z-10 relative shadow-sm">
         <div className="flex items-center gap-2.5 sm:gap-4">
           <button
             onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
-            className="p-2 -ml-1 text-gray-600 dark:text-gray-300 hover:text-[#D4AF37] hover:bg-gray-100 dark:hover:bg-[#2A2A2A] rounded-lg md:hidden transition-colors"
+            className="p-2 -ml-1 text-gray-600 dark:text-gray-300 hover:text-[#D4AF37] rounded-lg md:hidden"
             aria-label="Toggle navigation drawer"
           >
             <Menu className="w-6 h-6" />
@@ -561,15 +463,17 @@ export default function ProjectEntryTool() {
               <h1 className="text-gray-900 dark:text-white font-bold text-lg sm:text-xl tracking-wide">Solarithm</h1>
               <span className="text-amber-600 dark:text-[#D4AF37] font-bold text-lg sm:text-xl tracking-wide">Commerce</span>
             </div>
-            <p className="text-sm text-gray-500 dark:text-gray-400 hidden sm:block">Client acquisition, proposal management, and dynamic pricing engine.</p>
+            <p className="text-xs sm:text-sm text-gray-500 dark:text-gray-400 hidden sm:block">Client acquisition, proposal management, and dynamic pricing engine.</p>
           </div>
         </div>
         <div className="flex items-center gap-2 sm:gap-4">
-          <div className="text-sm text-gray-600 dark:text-gray-200 hidden lg:block">Logged in as: <span className="text-gray-900 dark:text-gray-100 font-medium">{userEmail}</span></div>
+          <div className="text-sm text-gray-600 dark:text-gray-200 hidden lg:block">
+            Logged in as: <span className="text-gray-900 dark:text-gray-100 font-medium">{userEmail}</span>
+          </div>
           <ThemeToggle />
           <button
             onClick={handleLogout}
-            className="px-3 sm:px-4 py-1.5 sm:py-2 bg-[#D4AF37] text-black text-sm sm:text-base font-medium rounded hover:opacity-90 transition-colors shadow-sm whitespace-nowrap"
+            className="px-3 sm:px-4 py-1.5 sm:py-2 bg-[#D4AF37] text-black text-xs sm:text-sm font-semibold rounded-lg hover:opacity-90 transition-colors shadow-sm cursor-pointer"
           >
             Logout
           </button>
@@ -580,101 +484,70 @@ export default function ProjectEntryTool() {
         {/* Mobile Drawer Backdrop */}
         {isMobileMenuOpen && (
           <div
-            className="fixed inset-0 bg-black/60 backdrop-blur-sm z-40 md:hidden animate-in fade-in duration-200"
+            className="fixed inset-0 bg-black/60 backdrop-blur-sm z-40 md:hidden"
             onClick={() => setIsMobileMenuOpen(false)}
           />
         )}
 
-        {/* Sidebar Navigation (Desktop Persistent & Mobile Slide-Out Drawer) */}
+        {/* Sidebar */}
         <aside
-          className={`fixed inset-y-0 left-0 z-50 w-72 bg-white dark:bg-[#1E1E1E] border-r border-gray-200 dark:border-[#333333] flex flex-col shrink-0 shadow-2xl transition-transform duration-300 ease-in-out md:static md:w-64 md:shadow-sm md:z-0 md:translate-x-0 ${
+          className={`fixed inset-y-0 left-0 z-50 w-72 bg-white dark:bg-[#1E1E1E] border-r border-gray-200 dark:border-[#333333] flex flex-col shrink-0 shadow-2xl transition-transform duration-300 md:static md:w-64 md:shadow-sm md:translate-x-0 ${
             isMobileMenuOpen ? "translate-x-0" : "-translate-x-full"
           }`}
         >
-          {/* Mobile Drawer Header */}
           <div className="p-4 border-b border-gray-200 dark:border-[#333333] flex items-center justify-between md:hidden">
-            <div className="flex items-center gap-2.5">
-              <div className="w-8 h-8 rounded-lg bg-amber-50 dark:bg-[#2A2A2A] border border-amber-200 dark:border-[#333333] flex items-center justify-center">
-                <Briefcase className="w-4 h-4 text-amber-600 dark:text-[#D4AF37]" />
-              </div>
-              <div>
-                <h2 className="font-bold text-gray-900 dark:text-white text-base leading-tight">Solarithm Commerce</h2>
-                <p className="text-xs text-gray-500 dark:text-gray-400">Sales Navigation</p>
-              </div>
-            </div>
-            <button
-              onClick={() => setIsMobileMenuOpen(false)}
-              className="p-1.5 text-gray-400 hover:text-gray-900 dark:hover:text-white rounded-lg hover:bg-gray-100 dark:hover:bg-[#2A2A2A] transition-colors"
-              aria-label="Close navigation"
-            >
+            <h2 className="font-bold text-gray-900 dark:text-white text-base">Solarithm Commerce</h2>
+            <button onClick={() => setIsMobileMenuOpen(false)} className="p-1.5 text-gray-400 hover:text-white">
               <X className="w-5 h-5" />
             </button>
           </div>
 
-          <nav className="flex-1 py-4 md:py-6 space-y-1 px-2 md:px-0">
+          <nav className="flex-1 py-4 space-y-1 px-2 md:px-0">
             <button
-              onClick={() => {
-                setActiveTab("register");
-                setIsMobileMenuOpen(false);
-              }}
-              className={`w-full flex items-center gap-3 px-4 md:px-6 py-3 rounded-lg md:rounded-none transition-colors text-base font-medium ${
+              onClick={() => { setActiveTab("register"); setIsMobileMenuOpen(false); }}
+              className={`w-full flex items-center gap-3 px-4 md:px-6 py-3 text-sm font-medium transition-colors ${
                 activeTab === "register"
-                  ? "bg-amber-50 dark:bg-[#2A2A2A] text-amber-700 dark:text-[#D4AF37] md:border-r-2 md:border-amber-500 dark:md:border-[#D4AF37]"
-                  : "text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-[#2A2A2A] hover:text-amber-700 dark:hover:text-[#D4AF37] border-r-0 md:border-r-2 md:border-transparent"
+                  ? "bg-amber-50 dark:bg-[#2A2A2A] text-amber-700 dark:text-[#D4AF37] md:border-r-2 md:border-amber-500"
+                  : "text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-[#2A2A2A]"
               }`}
             >
               <UserPlus className="w-5 h-5 shrink-0" />
               <span>Register New Client</span>
             </button>
             <button
-              onClick={() => {
-                setActiveTab("new_project");
-                setIsMobileMenuOpen(false);
-              }}
-              className={`w-full flex items-center gap-3 px-4 md:px-6 py-3 rounded-lg md:rounded-none transition-colors text-base font-medium ${
+              onClick={() => { setActiveTab("new_project"); setIsMobileMenuOpen(false); }}
+              className={`w-full flex items-center gap-3 px-4 md:px-6 py-3 text-sm font-medium transition-colors ${
                 activeTab === "new_project"
-                  ? "bg-amber-50 dark:bg-[#2A2A2A] text-amber-700 dark:text-[#D4AF37] md:border-r-2 md:border-amber-500 dark:md:border-[#D4AF37]"
-                  : "text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-[#2A2A2A] hover:text-amber-700 dark:hover:text-[#D4AF37] border-r-0 md:border-r-2 md:border-transparent"
+                  ? "bg-amber-50 dark:bg-[#2A2A2A] text-amber-700 dark:text-[#D4AF37] md:border-r-2 md:border-amber-500"
+                  : "text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-[#2A2A2A]"
               }`}
             >
               <FileText className="w-5 h-5 shrink-0" />
               <span>New Project</span>
             </button>
             <button
-              onClick={() => {
-                setActiveTab("my_projects");
-                setIsMobileMenuOpen(false);
-              }}
-              className={`w-full flex items-center gap-3 px-4 md:px-6 py-3 rounded-lg md:rounded-none transition-colors text-base font-medium ${
+              onClick={() => { setActiveTab("my_projects"); setIsMobileMenuOpen(false); }}
+              className={`w-full flex items-center gap-3 px-4 md:px-6 py-3 text-sm font-medium transition-colors ${
                 activeTab === "my_projects"
-                  ? "bg-amber-50 dark:bg-[#2A2A2A] text-amber-700 dark:text-[#D4AF37] md:border-r-2 md:border-amber-500 dark:md:border-[#D4AF37]"
-                  : "text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-[#2A2A2A] hover:text-amber-700 dark:hover:text-[#D4AF37] border-r-0 md:border-r-2 md:border-transparent"
+                  ? "bg-amber-50 dark:bg-[#2A2A2A] text-amber-700 dark:text-[#D4AF37] md:border-r-2 md:border-amber-500"
+                  : "text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-[#2A2A2A]"
               }`}
             >
               <FolderOpen className="w-5 h-5 shrink-0" />
               <span>My Projects</span>
             </button>
           </nav>
-
-          {/* Mobile Footer in Drawer */}
-          <div className="p-4 border-t border-gray-200 dark:border-[#333333] md:hidden">
-            <div className="text-xs text-gray-500 dark:text-gray-400 truncate">
-              Logged in: <span className="text-gray-800 dark:text-gray-200 font-medium">{userEmail}</span>
-            </div>
-          </div>
         </aside>
 
-        {/* Main Content Area */}
-        <main className="flex-1 p-4 sm:p-6 md:p-8 overflow-y-auto flex flex-col min-w-0 bg-gray-50 dark:bg-[#121212] transition-colors duration-200">
-          <div className="flex-1 w-full max-w-full min-w-0 transition-all duration-300">
+        {/* Main Workspace */}
+        <main className="flex-1 p-4 sm:p-6 md:p-8 overflow-y-auto flex flex-col min-w-0 bg-gray-50 dark:bg-[#121212]">
+          <div className="flex-1 w-full max-w-full min-w-0">
             {activeTab === "register" && <RegisterClientTab lockedEmail={userEmail} currentUser={currentUserObj} />}
             {activeTab === "new_project" && <NewProjectTab lockedEmail={userEmail} setActiveTab={setActiveTab} currentUser={currentUserObj} />}
             {activeTab === "my_projects" && <MyProjectsTab lockedEmail={userEmail} currentUser={currentUserObj} />}
           </div>
-          
-          {/* Footer */}
           <footer className="mt-auto pt-8 pb-4 text-center">
-            <p className="text-sm text-gray-500 dark:text-gray-400">© 2026 Solarithm. All Rights Reserved. Unauthorized replication prohibited.</p>
+            <p className="text-xs text-gray-500 dark:text-gray-400">© 2026 Solarithm. All Rights Reserved.</p>
           </footer>
         </main>
       </div>
@@ -682,8 +555,7 @@ export default function ProjectEntryTool() {
   );
 }
 
-// --- TAB COMPONENTS ---
-
+// --- REGISTER CLIENT TAB ---
 function RegisterClientTab({ lockedEmail, currentUser }: { lockedEmail: string | null; currentUser: any }) {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [successMsg, setSuccessMsg] = useState("");
@@ -692,47 +564,76 @@ function RegisterClientTab({ lockedEmail, currentUser }: { lockedEmail: string |
   const [loadingClients, setLoadingClients] = useState(true);
   const [proposals, setProposals] = useState<any[]>([]);
 
+  // Fixed Retainer Project Package States
+  const [commercialModel, setCommercialModel] = useState<"STANDARD" | "FIXED_PACKAGE">("STANDARD");
+  const [scopeCovered, setScopeCovered] = useState<"Pre Design" | "Post Design">("Pre Design");
+  const [projectsPerMonth, setProjectsPerMonth] = useState<number>(100);
+  const [durationMonths, setDurationMonths] = useState<number>(1);
+  const [confirmationDate, setConfirmationDate] = useState<string>(getTodayDateString());
+
   const { register, handleSubmit, reset, control, formState: { errors } } = useForm<ClientFormData>({
     resolver: zodResolver(clientSchema)
   });
 
-  const watchedGstin = useWatch({
-    control,
-    name: "gstin"
-  });
+  const watchedGstin = useWatch({ control, name: "gstin" });
   const isGstinProvided = Boolean(watchedGstin && watchedGstin.trim().length > 0);
 
   useEffect(() => {
-    // Strictly defer data fetching until Firebase currentUser is defined and loaded
-    if (!currentUser || !lockedEmail) {
-      return;
-    }
+    if (!lockedEmail) return;
 
-    const q = query(
-      collection(db, "clients"),
-      where("salesPersonEmail", "==", lockedEmail)
-    );
-    const unsub = onSnapshot(q, (snapshot) => {
+    // Resilient Clients listener (Reads from master /clients and filters client-side)
+    const clientsRef = collection(db, "clients");
+    const unsub = onSnapshot(clientsRef, (snapshot) => {
       try {
         const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        data.sort((a: any, b: any) => getSafeTimestampMillis(b.createdAt) - getSafeTimestampMillis(a.createdAt));
-        setClients(data);
+        const normalizedLockedEmail = lockedEmail.toLowerCase().trim();
+        const isAdmin = ["owner", "admin", "superadmin"].includes(String(currentUser?.role || "").toLowerCase().trim());
+
+        // Client-side filtering: list clients where salesPersonEmail, registeredBy, registeredByEmail, or salesPerson matches lockedEmail
+        const relevantClients = isAdmin 
+          ? data 
+          : data.filter((c: any) => {
+              const spEmail = String(c.salesPersonEmail || "").toLowerCase().trim();
+              const regBy = String(c.registeredBy || "").toLowerCase().trim();
+              const regByEmail = String(c.registeredByEmail || "").toLowerCase().trim();
+              const sp = String(c.salesPerson || "").toLowerCase().trim();
+
+              return (
+                spEmail === normalizedLockedEmail ||
+                regBy === normalizedLockedEmail ||
+                regByEmail === normalizedLockedEmail ||
+                sp === normalizedLockedEmail
+              );
+            });
+
+        relevantClients.sort((a: any, b: any) => getSafeTimestampMillis(b.createdAt) - getSafeTimestampMillis(a.createdAt));
+        setClients(relevantClients);
       } catch (err) {
-        console.error("Error processing clients in RegisterClientTab:", err);
+        console.error("Error processing clients:", err);
       } finally {
         setLoadingClients(false);
       }
-    }, (err) => {
-      console.error("Error fetching clients in RegisterClientTab:", err);
-      setClients([]);
+    }, () => {
       setLoadingClients(false);
     });
 
-    const pq = query(collection(db, COLLECTIONS.PROPOSALS));
-    const unsubP = onSnapshot(pq, (snapshot) => {
-      setProposals(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-    }, (err) => {
-      console.error("Error fetching proposals in RegisterClientTab:", err);
+    // Proposals listener: extract proposal identifier flexibly
+    const unsubP = onSnapshot(collection(db, COLLECTIONS.PROPOSALS), (snapshot) => {
+      try {
+        const pList = snapshot.docs.map(doc => {
+          const d = doc.data();
+          const pNum = String(d.proposalNumber || d.proposalId || d.number || doc.id || "").trim();
+          return {
+            id: doc.id,
+            ...d,
+            proposalNumber: pNum
+          };
+        });
+        setProposals(pList);
+      } catch {
+        setProposals([]);
+      }
+    }, () => {
       setProposals([]);
     });
 
@@ -751,10 +652,10 @@ function RegisterClientTab({ lockedEmail, currentUser }: { lockedEmail: string |
     try {
       const selectedProposal = proposals.find(p => p.proposalNumber === data.proposalNumber);
       const pricingCategory = selectedProposal?.pricingCategory || 'T1';
-      const clientEmailClean = data.email.trim().toLowerCase();
-      const contactNumberClean = data.phone.trim();
+      const clientEmailClean = (data.email || "").trim().toLowerCase();
+      const contactNumberClean = safeStringIdentifier(data.phone);
 
-      const payload = {
+      const payload: any = {
         [CLIENT_FIELDS.COMPANY_NAME]: toTitleCase(data.companyName),
         [CLIENT_FIELDS.CONTACT_PERSON]: toTitleCase(data.contactPerson),
         [CLIENT_FIELDS.EMAIL]: clientEmailClean,
@@ -762,37 +663,37 @@ function RegisterClientTab({ lockedEmail, currentUser }: { lockedEmail: string |
         [CLIENT_FIELDS.PHONE]: contactNumberClean,
         [CLIENT_FIELDS.CONTACT_NUMBER]: contactNumberClean,
         [CLIENT_FIELDS.CITY]: toTitleCase(data.city),
-        [CLIENT_FIELDS.GSTIN]: data.gstin ? data.gstin.toUpperCase().trim() : "",
+        [CLIENT_FIELDS.GSTIN]: safeStringIdentifier(data.gstin).toUpperCase(),
+        [CLIENT_FIELDS.PAN]: safeStringIdentifier(data.pan).toUpperCase(),
+        [CLIENT_FIELDS.PINCODE]: safeStringIdentifier(data.pincode),
+        [CLIENT_FIELDS.CONSUMER_NUMBER]: safeStringIdentifier(data.consumerNumber),
+        [CLIENT_FIELDS.SANCTION_NUMBER]: safeStringIdentifier(data.sanctionNumber),
         [CLIENT_FIELDS.BILLING_ADDRESS]: data.billingAddress ? data.billingAddress.trim() : "",
         [CLIENT_FIELDS.PROPOSAL_NUMBER]: data.proposalNumber,
         [CLIENT_FIELDS.PRICING_CATEGORY]: pricingCategory,
-        [CLIENT_FIELDS.STATUS]: CLIENT_STATUS.PENDING,
+        [CLIENT_FIELDS.STATUS]: CLIENT_STATUS.APPROVED, // Auto-available for projects
         [CLIENT_FIELDS.SALES_PERSON_EMAIL]: lockedEmail,
-        [CLIENT_FIELDS.CREATED_AT]: serverTimestamp()
+        registeredBy: lockedEmail,
+        registeredByEmail: lockedEmail,
+        commercialModel,
+        subscriptionPlan: commercialModel === "FIXED_PACKAGE" ? {
+          scopeCovered,
+          projectsPerMonth: Number(projectsPerMonth),
+          durationMonths: Number(durationMonths),
+          confirmationDate,
+          status: "PENDING_APPROVAL"
+        } : null,
+        createdAt: serverTimestamp()
       };
       
-      const clientRef = await addDoc(collection(db, COLLECTIONS.CLIENTS), payload);
-      
-      // Audit log entry per Master Blueprint
-      try {
-        await addDoc(collection(db, COLLECTIONS.AUDIT_LOGS), {
-          action: "CLIENT_REGISTERED",
-          actor: lockedEmail,
-          target: payload[CLIENT_FIELDS.COMPANY_NAME],
-          details: { 
-            clientId: clientRef.id, 
-            proposalNumber: data.proposalNumber,
-            clientEmail: clientEmailClean,
-            contactNumber: contactNumberClean
-          },
-          timestamp: serverTimestamp()
-        });
-      } catch (auditErr) {
-        console.warn("Audit log notice:", auditErr);
-      }
-
-      setSuccessMsg("Client registered successfully. Awaiting admin approval.");
+      await addDoc(collection(db, COLLECTIONS.CLIENTS), sanitizeFirestorePayload(payload));
+      setSuccessMsg("Client registered successfully!");
       reset();
+      setCommercialModel("STANDARD");
+      setScopeCovered("Pre Design");
+      setProjectsPerMonth(100);
+      setDurationMonths(1);
+      setConfirmationDate(getTodayDateString());
     } catch (err: any) {
       setErrorMsg(err.message || "Failed to register client");
     } finally {
@@ -800,242 +701,293 @@ function RegisterClientTab({ lockedEmail, currentUser }: { lockedEmail: string |
     }
   };
 
-  const approvedCount = useMemo(() => clients.filter(c => c.status === CLIENT_STATUS.APPROVED).length, [clients]);
-  const pendingCount = useMemo(() => clients.filter(c => c.status === CLIENT_STATUS.PENDING || !c.status).length, [clients]);
-  const rejectedCount = useMemo(() => clients.filter(c => c.status === CLIENT_STATUS.REJECTED).length, [clients]);
-
   return (
-    <div className="w-full space-y-6 sm:space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
-      {/* Metric Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="bg-white dark:bg-[#1E1E1E] border border-gray-200 dark:border-[#333333] p-4 sm:p-5 rounded-xl flex items-center justify-between shadow-sm">
-          <div>
-            <p className="text-xs sm:text-sm font-medium text-gray-500 dark:text-gray-400">Total Registered</p>
-            <p className="text-2xl sm:text-3xl font-bold text-gray-900 dark:text-white mt-1">{clients.length}</p>
-          </div>
-          <div className="w-10 h-10 rounded-lg bg-amber-50 dark:bg-[#2A2A2A] flex items-center justify-center text-amber-600 dark:text-[#D4AF37]">
-            <Building2 className="w-5 h-5" />
-          </div>
-        </div>
-        <div className="bg-white dark:bg-[#1E1E1E] border border-gray-200 dark:border-[#333333] p-4 sm:p-5 rounded-xl flex items-center justify-between shadow-sm">
-          <div>
-            <p className="text-xs sm:text-sm font-medium text-gray-500 dark:text-gray-400">Approved Clients</p>
-            <p className="text-2xl sm:text-3xl font-bold text-emerald-600 dark:text-emerald-400 mt-1">{approvedCount}</p>
-          </div>
-          <div className="w-10 h-10 rounded-lg bg-emerald-500/10 flex items-center justify-center text-emerald-600 dark:text-emerald-400">
-            <CheckCircle2 className="w-5 h-5" />
-          </div>
-        </div>
-        <div className="bg-white dark:bg-[#1E1E1E] border border-gray-200 dark:border-[#333333] p-4 sm:p-5 rounded-xl flex items-center justify-between shadow-sm">
-          <div>
-            <p className="text-xs sm:text-sm font-medium text-gray-500 dark:text-gray-400">Pending Approval</p>
-            <p className="text-2xl sm:text-3xl font-bold text-amber-600 dark:text-amber-400 mt-1">{pendingCount}</p>
-          </div>
-          <div className="w-10 h-10 rounded-lg bg-amber-500/10 flex items-center justify-center text-amber-600 dark:text-amber-400">
-            <Clock className="w-5 h-5" />
-          </div>
-        </div>
-        <div className="bg-white dark:bg-[#1E1E1E] border border-gray-200 dark:border-[#333333] p-4 sm:p-5 rounded-xl flex items-center justify-between shadow-sm">
-          <div>
-            <p className="text-xs sm:text-sm font-medium text-gray-500 dark:text-gray-400">Rejected / Returned</p>
-            <p className="text-2xl sm:text-3xl font-bold text-rose-600 dark:text-rose-400 mt-1">{rejectedCount}</p>
-          </div>
-          <div className="w-10 h-10 rounded-lg bg-rose-500/10 flex items-center justify-center text-rose-600 dark:text-rose-400">
-            <XCircle className="w-5 h-5" />
-          </div>
-        </div>
-      </div>
-
-      <div className="w-full bg-white dark:bg-[#1E1E1E] p-4 sm:p-6 md:p-8 rounded-xl border border-gray-200 dark:border-[#333333] shadow-sm">
+    <div className="w-full space-y-6 sm:space-y-8 animate-in fade-in duration-300">
+      <div className="w-full bg-white dark:bg-[#1E1E1E] p-5 sm:p-8 rounded-2xl border border-gray-200 dark:border-[#333333] shadow-sm">
         <h2 className="text-xl sm:text-2xl font-bold font-sans text-gray-900 dark:text-white mb-2">Register New Client</h2>
-        <p className="text-gray-600 dark:text-gray-400 mb-6 text-sm sm:text-base">Register a new client before creating a project. Once approved, this client will be available in your project form.</p>
+        <p className="text-gray-600 dark:text-gray-400 mb-6 text-sm">Register a new client before creating a project.</p>
         
         {successMsg && (
-          <div className="mb-6 p-4 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 rounded-lg flex items-center gap-2 border border-emerald-500/30">
-            <CheckCircle2 className="w-5 h-5 text-emerald-600 dark:text-emerald-400 shrink-0" />
-            <span className="text-sm sm:text-base font-medium">{successMsg}</span>
+          <div className="mb-6 p-4 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 rounded-xl flex items-center gap-2 border border-emerald-500/30">
+            <CheckCircle2 className="w-5 h-5 shrink-0" />
+            <span className="text-sm font-medium">{successMsg}</span>
           </div>
         )}
         
         {errorMsg && (
-          <div className="mb-6 p-4 bg-rose-500/10 text-rose-600 dark:text-rose-400 rounded-lg flex items-start gap-2 border border-rose-500/30">
-            <AlertCircle className="w-5 h-5 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
-            <span className="text-sm sm:text-base font-medium">{errorMsg}</span>
+          <div className="mb-6 p-4 bg-rose-500/10 text-rose-600 dark:text-rose-400 rounded-xl flex items-start gap-2 border border-rose-500/30">
+            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+            <span className="text-sm font-medium">{errorMsg}</span>
           </div>
         )}
 
         <form onSubmit={handleSubmit(onSubmit)} className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6">
-          <div className="space-y-1">
-            <label className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-200">Company Name *</label>
-            <input 
-              {...register("companyName")} 
-              placeholder="e.g. Acme Solar Solutions"
-              className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] outline-none" 
-            />
-            {errors.companyName && <p className="text-sm text-rose-500">{errors.companyName.message as string}</p>}
+          <div className="space-y-1.5">
+            <label className="text-xs font-semibold text-gray-700 dark:text-gray-200 uppercase tracking-wider">Company Name *</label>
+            <input {...register("companyName")} placeholder="e.g. Acme Solar Solutions" className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#141414] text-gray-900 dark:text-white outline-none focus:ring-2 focus:ring-[#D4AF37]" />
+            {errors.companyName && <p className="text-xs text-rose-500">{errors.companyName.message}</p>}
           </div>
 
-          <div className="space-y-1">
-            <label className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-200">Contact Person *</label>
-            <input 
-              {...register("contactPerson")} 
-              placeholder="e.g. Rajesh Sharma"
-              className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] outline-none" 
-            />
-            {errors.contactPerson && <p className="text-sm text-rose-500">{errors.contactPerson.message as string}</p>}
+          <div className="space-y-1.5">
+            <label className="text-xs font-semibold text-gray-700 dark:text-gray-200 uppercase tracking-wider">Contact Person *</label>
+            <input {...register("contactPerson")} placeholder="e.g. Rajesh Sharma" className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#141414] text-gray-900 dark:text-white outline-none focus:ring-2 focus:ring-[#D4AF37]" />
+            {errors.contactPerson && <p className="text-xs text-rose-500">{errors.contactPerson.message}</p>}
           </div>
 
-          <div className="space-y-1">
-            <label className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-200">City *</label>
-            <input 
-              {...register("city")} 
-              placeholder="e.g. Ahmedabad"
-              className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] outline-none" 
-            />
-            {errors.city && <p className="text-sm text-rose-500">{errors.city.message as string}</p>}
+          <div className="space-y-1.5">
+            <label className="text-xs font-semibold text-gray-700 dark:text-gray-200 uppercase tracking-wider">City *</label>
+            <input {...register("city")} placeholder="e.g. Ahmedabad" className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#141414] text-gray-900 dark:text-white outline-none focus:ring-2 focus:ring-[#D4AF37]" />
+            {errors.city && <p className="text-xs text-rose-500">{errors.city.message}</p>}
           </div>
           
-          <div className="space-y-1">
-            <label className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-200">Proposal Number *</label>
-            <select {...register("proposalNumber")} className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] outline-none">
-              <option value="">Select a proposal</option>
-              {proposals.map(p => (
-                <option key={p.id} value={p.proposalNumber}>{p.proposalNumber}</option>
-              ))}
-            </select>
-            {errors.proposalNumber && <p className="text-sm text-rose-500">{errors.proposalNumber.message as string}</p>}
+          <div className="space-y-1.5">
+            <label className="text-xs font-semibold text-gray-700 dark:text-gray-200 uppercase tracking-wider">Proposal Number *</label>
+            {proposals.length > 0 ? (
+              <select {...register("proposalNumber")} className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#141414] text-gray-900 dark:text-white outline-none focus:ring-2 focus:ring-[#D4AF37]">
+                <option value="">Select proposal from Admin Console</option>
+                {proposals.map(p => {
+                  const pNum = p.proposalNumber || p.proposalId || p.number || p.id;
+                  const label = p.clientName ? `${pNum} (${p.clientName})` : pNum;
+                  return (
+                    <option key={p.id} value={pNum}>{label}</option>
+                  );
+                })}
+              </select>
+            ) : (
+              <input {...register("proposalNumber")} placeholder="e.g. PROP-2026-001" className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#141414] text-gray-900 dark:text-white outline-none focus:ring-2 focus:ring-[#D4AF37]" />
+            )}
+            {errors.proposalNumber && <p className="text-xs text-rose-500">{errors.proposalNumber.message}</p>}
           </div>
 
-          <div className="space-y-1">
-            <label className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-200">Client Email Address *</label>
-            <input 
-              type="email"
-              {...register("email")} 
-              placeholder="e.g. contact@acmesolar.com"
-              className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] outline-none" 
-            />
-            {errors.email && <p className="text-sm text-rose-500">{errors.email.message as string}</p>}
-          </div>
+          {/* COMMERCIAL MODEL TOGGLE & FIXED PACKAGE SETUP */}
+          <div className="md:col-span-2 space-y-3 pt-1 pb-1">
+            <label className="text-xs font-semibold text-gray-700 dark:text-gray-200 uppercase tracking-wider block">
+              Commercial Model *
+            </label>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() => setCommercialModel("STANDARD")}
+                className={`p-3.5 rounded-xl border text-left transition-all flex items-start gap-3 cursor-pointer ${
+                  commercialModel === "STANDARD"
+                    ? "border-[#D4AF37] bg-amber-500/10 dark:bg-[#D4AF37]/10 text-gray-900 dark:text-white ring-1 ring-[#D4AF37]"
+                    : "border-gray-200 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#141414] text-gray-600 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-700"
+                }`}
+              >
+                <div className={`mt-0.5 w-4 h-4 rounded-full border flex items-center justify-center shrink-0 ${
+                  commercialModel === "STANDARD" ? "border-[#D4AF37] bg-[#D4AF37]" : "border-gray-400 dark:border-gray-600"
+                }`}>
+                  {commercialModel === "STANDARD" && <div className="w-1.5 h-1.5 rounded-full bg-black" />}
+                </div>
+                <div>
+                  <div className="font-semibold text-sm text-gray-900 dark:text-white">Standard</div>
+                  <div className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">Pay-as-you-go / kW-based commercial rate card</div>
+                </div>
+              </button>
 
-          <div className="space-y-1">
-            <label className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-200">Contact Number *</label>
-            <input 
-              type="tel"
-              maxLength={10}
-              {...register("phone")} 
-              placeholder="e.g. 9876543210 (10 digits)"
-              className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] outline-none font-mono" 
-            />
-            {errors.phone && <p className="text-sm text-rose-500">{errors.phone.message as string}</p>}
-          </div>
-
-          <div className="space-y-1 md:col-span-2">
-            <label className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-200">GSTIN (Optional)</label>
-            <input
-              {...register("gstin")}
-              placeholder="e.g. 24ABCDE1234F1Z5"
-              className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] outline-none uppercase font-mono text-sm sm:text-base"
-            />
-            {errors.gstin && <p className="text-sm text-rose-500">{errors.gstin.message as string}</p>}
-          </div>
-
-          <div className="space-y-1 md:col-span-2">
-            <div className="flex items-center justify-between">
-              <label className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-200">
-                Billing Address / Registered Office Address {isGstinProvided ? <span className="text-rose-500 font-bold">*</span> : <span className="text-gray-400 font-normal text-xs">(Optional)</span>}
-              </label>
-              {isGstinProvided && (
-                <span className="text-xs font-medium text-amber-600 dark:text-[#D4AF37]">
-                  Mandatory when GSTIN is provided
-                </span>
-              )}
+              <button
+                type="button"
+                onClick={() => setCommercialModel("FIXED_PACKAGE")}
+                className={`p-3.5 rounded-xl border text-left transition-all flex items-start gap-3 cursor-pointer ${
+                  commercialModel === "FIXED_PACKAGE"
+                    ? "border-[#D4AF37] bg-amber-500/10 dark:bg-[#D4AF37]/10 text-gray-900 dark:text-white ring-1 ring-[#D4AF37]"
+                    : "border-gray-200 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#141414] text-gray-600 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-700"
+                }`}
+              >
+                <div className={`mt-0.5 w-4 h-4 rounded-full border flex items-center justify-center shrink-0 ${
+                  commercialModel === "FIXED_PACKAGE" ? "border-[#D4AF37] bg-[#D4AF37]" : "border-gray-400 dark:border-gray-600"
+                }`}>
+                  {commercialModel === "FIXED_PACKAGE" && <div className="w-1.5 h-1.5 rounded-full bg-black" />}
+                </div>
+                <div>
+                  <div className="font-semibold text-sm text-gray-900 dark:text-white flex items-center gap-1.5">
+                    <span>Fixed Project Package</span>
+                    <span className="px-1.5 py-0.5 text-[10px] bg-[#D4AF37] text-black font-bold rounded">Retainer</span>
+                  </div>
+                  <div className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">Fixed monthly volume package with bonus quota</div>
+                </div>
+              </button>
             </div>
-            <textarea
-              {...register("billingAddress")}
-              rows={3}
-              placeholder="Complete registered office address, building, street, city, state, and PIN code for billing/invoicing"
-              className={`w-full p-2.5 rounded-lg border ${
-                errors.billingAddress
-                  ? "border-rose-500 focus:ring-rose-500"
-                  : "border-gray-300 dark:border-[#2A2A2A] focus:ring-[#D4AF37] focus-within:border-[#D4AF37]"
-              } bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 outline-none text-sm sm:text-base resize-y transition-colors`}
-            />
-            {errors.billingAddress && (
-              <p className="text-sm text-rose-500 font-medium">{errors.billingAddress.message as string}</p>
+
+            {commercialModel === "FIXED_PACKAGE" && (
+              <div className="p-4 sm:p-5 rounded-xl border border-[#D4AF37]/40 bg-amber-50/50 dark:bg-[#1A1812] space-y-4 mt-3">
+                <div className="flex items-center gap-2 text-[#D4AF37] font-semibold text-sm border-b border-[#D4AF37]/20 pb-2">
+                  <Sparkles className="w-4 h-4 text-[#D4AF37]" />
+                  <span>Fixed Retainer Project Package Setup</span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-semibold text-gray-700 dark:text-gray-300 uppercase">Scope Covered</label>
+                    <select
+                      value={scopeCovered}
+                      onChange={(e) => setScopeCovered(e.target.value as "Pre Design" | "Post Design")}
+                      className="w-full p-2 text-sm rounded-lg border border-gray-300 dark:border-[#333333] bg-white dark:bg-[#141414] text-gray-900 dark:text-white outline-none focus:ring-1 focus:ring-[#D4AF37]"
+                    >
+                      <option value="Pre Design">Pre Design</option>
+                      <option value="Post Design">Post Design</option>
+                    </select>
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-semibold text-gray-700 dark:text-gray-300 uppercase">Projects / Month</label>
+                    <select
+                      value={projectsPerMonth}
+                      onChange={(e) => setProjectsPerMonth(Number(e.target.value))}
+                      className="w-full p-2 text-sm rounded-lg border border-gray-300 dark:border-[#333333] bg-white dark:bg-[#141414] text-gray-900 dark:text-white outline-none focus:ring-1 focus:ring-[#D4AF37]"
+                    >
+                      <option value={100}>100 Projects/Month</option>
+                      <option value={200}>200 Projects/Month</option>
+                      <option value={300}>300 Projects/Month</option>
+                    </select>
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-semibold text-gray-700 dark:text-gray-300 uppercase">Plan Duration</label>
+                    <select
+                      value={durationMonths}
+                      onChange={(e) => setDurationMonths(Number(e.target.value))}
+                      className="w-full p-2 text-sm rounded-lg border border-gray-300 dark:border-[#333333] bg-white dark:bg-[#141414] text-gray-900 dark:text-white outline-none focus:ring-1 focus:ring-[#D4AF37]"
+                    >
+                      <option value={1}>1 Month</option>
+                      <option value={3}>3 Months</option>
+                      <option value={6}>6 Months</option>
+                    </select>
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-semibold text-gray-700 dark:text-gray-300 uppercase">Confirmation Date</label>
+                    <input
+                      type="date"
+                      value={confirmationDate}
+                      onChange={(e) => setConfirmationDate(e.target.value)}
+                      className="w-full p-2 text-sm rounded-lg border border-gray-300 dark:border-[#333333] bg-white dark:bg-[#141414] text-gray-900 dark:text-white outline-none focus:ring-1 focus:ring-[#D4AF37]"
+                    />
+                  </div>
+                </div>
+              </div>
             )}
           </div>
 
-          <div className="md:col-span-2 flex justify-end mt-2 sm:mt-4">
-            <button
-              type="submit"
-              disabled={isSubmitting}
-              className="w-full sm:w-auto px-6 py-2.5 bg-[#D4AF37] text-black font-semibold rounded-lg hover:opacity-90 focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] focus:ring-offset-2 transition-all flex items-center justify-center gap-2 shadow-sm"
-            >
-              {isSubmitting ? <Loader2 className="w-5 h-5 animate-spin" /> : <UserPlus className="w-5 h-5" />}
+          <div className="space-y-1.5">
+            <label className="text-xs font-semibold text-gray-700 dark:text-gray-200 uppercase tracking-wider">Client Email *</label>
+            <input type="email" {...register("email")} placeholder="contact@acmesolar.com" className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#141414] text-gray-900 dark:text-white outline-none focus:ring-2 focus:ring-[#D4AF37]" />
+            {errors.email && <p className="text-xs text-rose-500">{errors.email.message}</p>}
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-xs font-semibold text-gray-700 dark:text-gray-200 uppercase tracking-wider">Contact Phone *</label>
+            <input type="tel" maxLength={10} {...register("phone")} placeholder="9876543210 (10 digits)" className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#141414] text-gray-900 dark:text-white outline-none focus:ring-2 focus:ring-[#D4AF37] font-mono" />
+            {errors.phone && <p className="text-xs text-rose-500">{errors.phone.message}</p>}
+          </div>
+
+          <div className="space-y-1.5 md:col-span-2">
+            <label className="text-xs font-semibold text-gray-700 dark:text-gray-200 uppercase tracking-wider">GSTIN (Optional)</label>
+            <input {...register("gstin")} placeholder="24ABCDE1234F1Z5" className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#141414] text-gray-900 dark:text-white outline-none uppercase font-mono" />
+          </div>
+
+          <div className="space-y-1.5 md:col-span-2">
+            <label className="text-xs font-semibold text-gray-700 dark:text-gray-200 uppercase tracking-wider">
+              Billing Address {isGstinProvided && <span className="text-rose-500">*</span>}
+            </label>
+            <textarea {...register("billingAddress")} rows={2} placeholder="Complete billing address" className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#141414] text-gray-900 dark:text-white outline-none resize-none" />
+            {errors.billingAddress && <p className="text-xs text-rose-500">{errors.billingAddress.message}</p>}
+          </div>
+
+          <div className="md:col-span-2 flex justify-end pt-2">
+            <button type="submit" disabled={isSubmitting} className="px-6 py-2.5 bg-[#D4AF37] text-black font-bold rounded-lg hover:bg-[#c59f2e] transition-all flex items-center gap-2 cursor-pointer">
+              {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <UserPlus className="w-4 h-4" />}
               Submit Client Registration
             </button>
           </div>
         </form>
       </div>
 
-      {/* List */}
-      <div className="w-full bg-white dark:bg-[#1E1E1E] p-4 sm:p-6 md:p-8 rounded-xl border border-gray-200 dark:border-[#333333] shadow-sm">
-        <h3 className="text-lg font-bold font-sans text-gray-900 dark:text-white mb-4 flex items-center gap-2">
-          <Building2 className="w-5 h-5 text-amber-600 dark:text-[#D4AF37]" />
-          My Registered Clients
-        </h3>
-        
+      {/* My Registered Clients Section */}
+      <div className="w-full bg-white dark:bg-[#1E1E1E] p-5 sm:p-8 rounded-2xl border border-gray-200 dark:border-[#333333] shadow-sm">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h3 className="text-lg sm:text-xl font-bold font-sans text-gray-900 dark:text-white">My Registered Clients</h3>
+            <p className="text-xs text-gray-500 dark:text-gray-400">Clients registered by {lockedEmail} (Displaying all approved, active, and pending records)</p>
+          </div>
+          <span className="px-3 py-1 bg-amber-500/10 text-amber-600 dark:text-[#D4AF37] font-semibold text-xs rounded-full border border-amber-500/30">
+            {clients.length} {clients.length === 1 ? "Client" : "Clients"}
+          </span>
+        </div>
+
         {loadingClients ? (
-          <div className="py-8 flex justify-center"><Loader2 className="w-6 h-6 animate-spin text-amber-600 dark:text-[#D4AF37]" /></div>
+          <div className="py-10 flex justify-center"><Loader2 className="w-7 h-7 animate-spin text-[#D4AF37]" /></div>
         ) : clients.length === 0 ? (
-          <div className="text-center py-8 text-gray-500 dark:text-gray-400">No clients registered yet.</div>
+          <div className="text-center py-10 text-sm text-gray-500 dark:text-gray-400">
+            No clients registered under your email yet. Register a client using the form above.
+          </div>
         ) : (
-          <div className="w-full overflow-x-auto rounded-lg border border-gray-200 dark:border-[#333333] bg-white dark:bg-[#1E1E1E]">
-            <table className="w-full text-left border-collapse whitespace-nowrap min-w-[640px]">
-              <thead className="bg-gray-50 dark:bg-transparent border-b border-gray-200 dark:border-[#333333]">
-                <tr className="text-gray-600 dark:text-gray-400 text-xs sm:text-sm uppercase font-semibold">
+          <div className="w-full overflow-x-auto rounded-xl border border-gray-200 dark:border-[#333333]">
+            <table className="w-full text-left text-sm whitespace-nowrap">
+              <thead className="bg-gray-50 dark:bg-[#252525] border-b border-gray-200 dark:border-[#333333] text-xs uppercase font-semibold text-gray-600 dark:text-gray-400">
+                <tr>
                   <th className="py-3 px-4">Company Name</th>
-                  <th className="py-3 px-4">Contact Info</th>
+                  <th className="py-3 px-4">Contact Person</th>
                   <th className="py-3 px-4">City</th>
-                  <th className="py-3 px-4">GSTIN & Address</th>
+                  <th className="py-3 px-4">Phone</th>
                   <th className="py-3 px-4">Proposal</th>
+                  <th className="py-3 px-4">Commercial Model</th>
                   <th className="py-3 px-4">Status</th>
-                  <th className="py-3 px-4">Date</th>
                 </tr>
               </thead>
-              <tbody className="text-sm sm:text-base divide-y divide-gray-100 dark:divide-[#2A2A2A]">
-                {clients.map(client => (
-                  <tr key={client.id} className="transition-colors hover:bg-gray-50 dark:hover:bg-[#2A2A2A]">
-                    <td className="py-3 px-4 font-medium text-gray-800 dark:text-gray-200">
-                      <div>{toTitleCase(client.companyName)}</div>
-                      {client.contactPerson && (
-                        <div className="text-xs text-gray-500 dark:text-gray-400 font-normal">Attn: {toTitleCase(client.contactPerson)}</div>
-                      )}
-                    </td>
-                    <td className="py-3 px-4 text-xs sm:text-sm text-gray-700 dark:text-gray-200">
-                      <div className="font-medium text-gray-800 dark:text-gray-200">{client.email || client.clientEmail || '-'}</div>
-                      <div className="text-xs text-gray-500 dark:text-gray-400 font-mono mt-0.5">{client.phone || client.contactNumber || '-'}</div>
-                    </td>
-                    <td className="py-3 px-4 text-gray-700 dark:text-gray-200">{toTitleCase(client.city)}</td>
-                    <td className="py-3 px-4 text-gray-700 dark:text-gray-200">
-                      <div className="font-mono text-xs">{client.gstin || <span className="text-gray-400 font-sans">No GSTIN</span>}</div>
-                      {client.billingAddress && (
-                        <div className="text-xs text-gray-500 dark:text-gray-400 truncate max-w-[220px]" title={client.billingAddress}>
-                          {client.billingAddress}
+              <tbody className="divide-y divide-gray-100 dark:divide-[#2A2A2A]">
+                {clients.map((c) => {
+                  const company = c.companyName || c.clientName || c.name || "Client";
+                  const contact = c.contactPerson || "-";
+                  const city = c.city || "-";
+                  const phone = c.phone || c.contactNumber || "-";
+                  const propNum = c.proposalNumber || "-";
+                  const status = c.status || "approved";
+                  const subPlan = c.subscriptionPlan || c.retainerPlan;
+
+                  return (
+                    <tr key={c.id} className="hover:bg-gray-50 dark:hover:bg-[#252525] transition-colors">
+                      <td className="py-3 px-4 font-semibold text-gray-900 dark:text-white">{company}</td>
+                      <td className="py-3 px-4 text-gray-600 dark:text-gray-300">{contact}</td>
+                      <td className="py-3 px-4 text-gray-600 dark:text-gray-300">{city}</td>
+                      <td className="py-3 px-4 font-mono text-xs">{phone}</td>
+                      <td className="py-3 px-4">
+                        <div className="flex flex-col gap-0.5">
+                          <span className="font-mono text-xs text-amber-600 dark:text-[#D4AF37]">{propNum}</span>
+                          {c.commercialModel === "FIXED_PACKAGE" && subPlan && (
+                            <span className="text-[10px] text-gray-500 dark:text-gray-400 font-medium">
+                              ({subPlan.scopeCovered} · {subPlan.projectsPerMonth}/mo · {subPlan.durationMonths}M)
+                            </span>
+                          )}
                         </div>
-                      )}
-                    </td>
-                    <td className="py-3 px-4 text-gray-700 dark:text-gray-200">{client.proposalNumber}</td>
-                    <td className="py-3 px-4">
-                      <span className={`inline-block px-2 py-1 rounded text-xs font-medium border text-center ${getStatusColor(client.status)}`}>
-                        {toTitleCase(client.status.replace(/_/g, ' '))}
-                      </span>
-                    </td>
-                    <td className="py-3 px-4 text-gray-600 dark:text-gray-200">
-                      {client.createdAt ? formatSafeDate(client.createdAt, 'MMM dd, yyyy', '...') : '...'}
-                    </td>
-                  </tr>
-                ))}
+                      </td>
+                      <td className="py-3 px-4">
+                        {c.commercialModel === "FIXED_PACKAGE" ? (
+                          <div className="flex flex-col gap-0.5">
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-semibold bg-amber-500/10 text-amber-600 dark:text-[#D4AF37] border border-amber-500/30 w-fit">
+                              <Sparkles className="w-3 h-3" />
+                              Fixed Package ({subPlan?.scopeCovered || "Retainer"})
+                            </span>
+                            {subPlan?.projectsPerMonth && (
+                              <span className="text-[11px] text-gray-500 dark:text-gray-400 font-mono">
+                                {subPlan.projectsPerMonth}/mo · {subPlan.durationMonths} month{subPlan.durationMonths > 1 ? "s" : ""}
+                              </span>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="px-2 py-0.5 rounded text-xs font-medium bg-gray-100 dark:bg-[#2A2A2A] text-gray-600 dark:text-gray-400 border border-gray-200 dark:border-[#333333]">
+                            Standard
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-3 px-4">
+                        <span className={`px-2 py-0.5 rounded text-xs font-semibold border ${getStatusColor(status)}`}>
+                          {toTitleCase(String(status).replace(/_/g, " "))}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -1045,6 +997,7 @@ function RegisterClientTab({ lockedEmail, currentUser }: { lockedEmail: string |
   );
 }
 
+// --- NEW PROJECT TAB (Resilient Admin Console Mapping) ---
 function NewProjectTab({ lockedEmail, setActiveTab, currentUser }: { lockedEmail: string | null, setActiveTab: any, currentUser: any }) {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
@@ -1071,464 +1024,294 @@ function NewProjectTab({ lockedEmail, setActiveTab, currentUser }: { lockedEmail
   const enteredProjectName = useWatch({ control, name: "projectName" }) || "";
   const enteredLocation = useWatch({ control, name: "location" }) || "";
 
-  // Search-First Deduplication Gate States
   const [isUpgradeModalOpen, setIsUpgradeModalOpen] = useState(false);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 
-  // Supported Scopes strictly from Firestore - no hardcoded fallback lists or dummy combinations
-  const uniqueScopes = useMemo(() => {
-    const dbScopes = scopesData
-      .map(s => (s.name || s.packageName || "").trim())
-      .filter(Boolean);
-    const unique = Array.from(new Set(dbScopes));
-    return unique.sort((a, b) => a.localeCompare(b));
+  // 1. Fetch Clients (Strict user-specific filtering [DIRECTIVE 2])
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, "clients"), (snapshot) => {
+      const normalizedUser = (lockedEmail || "").toLowerCase().trim();
+      const isAdmin = ["owner", "admin", "superadmin"].includes(String(currentUser?.role || "").toLowerCase().trim());
+
+      const activeList = snapshot.docs.map(d => ({ id: d.id, ...d.data() })).filter((c: any) => {
+        const st = String(c.status || "").toLowerCase().trim();
+        // Allow approved, active, pending_approval, or unset
+        if (["rejected", "deleted", "archived", "disabled"].includes(st)) return false;
+
+        // Admin/owner can see all active clients
+        if (isAdmin) return true;
+
+        // Sales representative sees ONLY clients registered by them
+        const spEmail = String(c.salesPersonEmail || "").toLowerCase().trim();
+        const regBy = String(c.registeredBy || "").toLowerCase().trim();
+        const regByEmail = String(c.registeredByEmail || "").toLowerCase().trim();
+        const sp = String(c.salesPerson || "").toLowerCase().trim();
+
+        return (
+          spEmail === normalizedUser ||
+          regBy === normalizedUser ||
+          regByEmail === normalizedUser ||
+          sp === normalizedUser
+        );
+      });
+
+      activeList.sort((a: any, b: any) => {
+        const nameA = (a.companyName || a.clientName || a.name || "").trim().toLowerCase();
+        const nameB = (b.companyName || b.clientName || b.name || "").trim().toLowerCase();
+        return nameA.localeCompare(nameB);
+      });
+      setClients(activeList);
+    }, () => setClients([]));
+    return () => unsub();
+  }, [lockedEmail, currentUser]);
+
+  // 2. Fetch Designers/Employees
+  useEffect(() => {
+    let cachedEmp: any[] = [];
+    let cachedUsers: any[] = [];
+    const sync = () => setDesigners(filterAndDeduplicateDesigners(cachedEmp, cachedUsers));
+
+    const unsubEmp = onSnapshot(collection(db, "employees"), snap => {
+      cachedEmp = snap.docs;
+      sync();
+    }, () => {});
+
+    const unsubUsers = onSnapshot(collection(db, "users"), snap => {
+      cachedUsers = snap.docs;
+      sync();
+    }, () => {});
+
+    return () => {
+      unsubEmp();
+      unsubUsers();
+    };
+  }, []);
+
+  // 3. Fetch Master Scopes from Admin Console (/scopes, /packages, /pricingRules)
+  useEffect(() => {
+    let sList: any[] = [];
+    let pkList: any[] = [];
+    let prList: any[] = [];
+
+    const sync = () => {
+      const combined = [...sList, ...pkList, ...prList];
+      const seen = new Set<string>();
+      const res: any[] = [];
+      for (const item of combined) {
+        const name = (item.name || item.packageName || item.title || item.label || item.scopeName || item.scope || item.serviceName || "").trim();
+        if (!name) continue;
+        const key = normalizeScopeDeduplicationKey(name);
+        if (!seen.has(key)) {
+          seen.add(key);
+          res.push({ ...item, name });
+        }
+      }
+      setScopesData(res);
+    };
+
+    const unsubS = onSnapshot(collection(db, "scopes"), snap => {
+      sList = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      sync();
+    }, () => {});
+
+    const unsubPk = onSnapshot(collection(db, "packages"), snap => {
+      pkList = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      sync();
+    }, () => {});
+
+    const unsubPr = onSnapshot(collection(db, "pricingRules"), snap => {
+      prList = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      setPricingRules(prList);
+      sync();
+    }, () => {});
+
+    return () => {
+      unsubS();
+      unsubPk();
+      unsubPr();
+    };
+  }, []);
+
+  // 4. Fetch Projects (for Deduplication)
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, "projects"), snap => {
+      setExistingProjects(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    }, () => setExistingProjects([]));
+    return () => unsub();
+  }, []);
+
+  // Pure Dynamic Scope List: populated EXCLUSIVELY from Firestore (/scopes, /packages, /pricingRules)
+  const uniqueScopes = useMemo((): string[] => {
+    const scopeMap = new Map<string, string>();
+    
+    // Dynamically populate from live Admin Console scopes/packages/pricingRules
+    scopesData.forEach(item => {
+      const name = (item.name || item.packageName || item.title || item.label || item.scopeName || "").trim();
+      if (name) {
+        const key = normalizeScopeDeduplicationKey(name);
+        if (!scopeMap.has(key)) {
+          scopeMap.set(key, name);
+        }
+      }
+    });
+
+    return Array.from(scopeMap.values()).sort((a, b) => a.localeCompare(b));
   }, [scopesData]);
 
   const selectedScopeDoc = useMemo(() => {
-    return scopesData.find(s => s.name === selectedScope);
+    if (!selectedScope) return null;
+    const targetKey = normalizeScopeDeduplicationKey(selectedScope);
+    return scopesData.find(s => normalizeScopeDeduplicationKey(s.name) === targetKey) || null;
   }, [scopesData, selectedScope]);
+
+  // Dynamic Sub-Services / Modules mapped directly from selected Firestore scope/package
+  const subServices = useMemo((): string[] => {
+    if (!selectedScopeDoc) return [];
+    const list: string[] = [];
+    if (Array.isArray(selectedScopeDoc.subServices)) {
+      selectedScopeDoc.subServices.forEach((s: any) => {
+        const val = typeof s === "string" ? s : (s?.name || s?.title || s?.label || "");
+        if (val && !list.includes(val)) list.push(val);
+      });
+    }
+    if (Array.isArray(selectedScopeDoc.modules)) {
+      selectedScopeDoc.modules.forEach((m: any) => {
+        const val = typeof m === "string" ? m : (m?.name || m?.phaseName || m?.title || "");
+        if (val && !list.includes(val)) list.push(val);
+      });
+    }
+    return list;
+  }, [selectedScopeDoc]);
 
   const packageScopes = useMemo((): ScopeItem[] => {
     if (!selectedScope) return [];
-    return parsePackageScopes(selectedScope, selectedScopeDoc);
+    return parsePackageScopes(selectedScope, selectedScopeDoc).map(s => ({
+      key: toCanonicalScopeKey(s.key),
+      label: s.label
+    }));
   }, [selectedScope, selectedScopeDoc]);
 
-  // Map each scope key (e.g. preDesign, pvsyst) to assigned designer email
   const [assignedScopes, setAssignedScopes] = useState<Record<string, string>>({});
   const [scopeAssignmentErrors, setScopeAssignmentErrors] = useState<Record<string, string>>({});
 
-  const uniqueSubServices = useMemo((): string[] => {
-    if (!selectedScope) return [];
-    const scopeObj = scopesData.find(s => s.name === selectedScope);
-    
-    if (scopeObj?.hasSubServices) {
-      return ["Standard", "Special", "Premium"];
-    }
-    
-    const subs = scopeObj?.subServices || [];
-    return Array.from(new Set(subs)).filter(Boolean) as string[];
-  }, [scopesData, selectedScope]);
-
-  // Handle resetting subService when scope changes
-  useEffect(() => {
-    setValue("subService", "");
-  }, [selectedScope, setValue]);
-
-  const calculatedPrice = useMemo(() => {
-    if (!selectedClientId || !selectedScope || !capacityValue) return null;
-    
-    const client = clients.find(c => c.id === selectedClientId);
-    if (!client) return null;
-    
-    const category = client.pricingCategory || 'T1';
-    
-    const match = pricingRules.find(rule => {
-      if (rule.serviceName !== selectedScope && rule.scope !== selectedScope) return false;
-      
-      if (uniqueSubServices.length > 0) {
-        if (rule.subService !== selectedSubService) return false;
-      }
-      
-      const ruleUnit = (rule.unit || 'KW').toUpperCase();
-      let capInRuleUnit = capacityValue;
-      
-      if (capacityUnit === 'KW' && ruleUnit === 'MW') capInRuleUnit = capacityValue / 1000;
-      else if (capacityUnit === 'MW' && ruleUnit === 'KW') capInRuleUnit = capacityValue * 1000;
-      else if (capacityUnit === 'W' && ruleUnit === 'KW') capInRuleUnit = capacityValue / 1000;
-      else if (capacityUnit === 'KW' && ruleUnit === 'W') capInRuleUnit = capacityValue * 1000;
-      else if (capacityUnit === 'W' && ruleUnit === 'MW') capInRuleUnit = capacityValue / 1000000;
-      else if (capacityUnit === 'MW' && ruleUnit === 'W') capInRuleUnit = capacityValue * 1000000;
-      
-      const min = rule.minCapacity ?? 0;
-      const max = rule.maxCapacity ?? Infinity;
-      if (capInRuleUnit < min || capInRuleUnit > max) return false;
-      
-      return true;
-    });
-    
-    if (match) {
-      let rate = 0;
-      if (category === 'T1') rate = match.tier1Price ?? match.t1Price ?? match.T1 ?? match.t1 ?? 0;
-      if (category === 'T2') rate = match.tier2Price ?? match.t2Price ?? match.T2 ?? match.t2 ?? 0;
-      if (category === 'T3') rate = match.tier3Price ?? match.t3Price ?? match.T3 ?? match.t3 ?? 0;
-      if (category === 'T4') rate = match.tier4Price ?? match.t4Price ?? match.T4 ?? match.t4 ?? 0;
-      
-      const priceType = (match.priceType || 'per_unit').toLowerCase();
-      let total = rate;
-      if (priceType !== 'fixed' && priceType !== 'lump sum') {
-        const ruleUnit = (match.unit || 'KW').toUpperCase();
-        let capInRuleUnit = capacityValue;
-        if (capacityUnit === 'KW' && ruleUnit === 'MW') capInRuleUnit = capacityValue / 1000;
-        else if (capacityUnit === 'MW' && ruleUnit === 'KW') capInRuleUnit = capacityValue * 1000;
-        else if (capacityUnit === 'W' && ruleUnit === 'KW') capInRuleUnit = capacityValue / 1000;
-        else if (capacityUnit === 'KW' && ruleUnit === 'W') capInRuleUnit = capacityValue * 1000;
-        else if (capacityUnit === 'W' && ruleUnit === 'MW') capInRuleUnit = capacityValue / 1000000;
-        else if (capacityUnit === 'MW' && ruleUnit === 'W') capInRuleUnit = capacityValue * 1000000;
-        
-        total = rate * capInRuleUnit;
-      }
-      
-      return { rate, total, category, priceType: match.priceType, unit: match.unit };
-    }
-    
-    return null;
-  }, [selectedClientId, selectedScope, selectedSubService, capacityValue, capacityUnit, clients, pricingRules, uniqueSubServices]);
-
-  useEffect(() => {
-    // Strictly defer data fetching until Firebase currentUser is defined and loaded
-    if (!currentUser || !lockedEmail) {
-      return;
-    }
-
-    const q = query(
-      collection(db, "clients"),
-      where("salesPersonEmail", "==", lockedEmail),
-      where("status", "==", "approved")
-    );
-    const unsub = onSnapshot(q, (snapshot) => {
-      setClients(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-    }, (err) => {
-      console.error("Error fetching clients in NewProjectTab:", err);
-      setClients([]);
-    });
-    
-    // Fetch active designers from both employees and users collections
-    let cachedEmpDocs: any[] = [];
-    let cachedUserDocs: any[] = [];
-
-    const syncDesigners = () => {
-      const activeDesigners = filterAndDeduplicateDesigners(cachedEmpDocs, cachedUserDocs);
-      setDesigners(activeDesigners);
-    };
-
-    const eq = query(collection(db, COLLECTIONS.EMPLOYEES));
-    const unsubD = onSnapshot(eq, (snapshot) => {
-      cachedEmpDocs = snapshot.docs;
-      syncDesigners();
-    }, (err) => {
-      console.error("Error fetching employees roster in NewProjectTab:", err);
-    });
-
-    const uq = query(collection(db, COLLECTIONS.USERS));
-    const unsubU = onSnapshot(uq, (snapshot) => {
-      cachedUserDocs = snapshot.docs;
-      syncDesigners();
-    }, (err) => {
-      console.error("Error fetching users roster in NewProjectTab:", err);
-    });
-
-    const pq = query(collection(db, "pricingRules"));
-    const unsubP = onSnapshot(pq, (snapshot) => {
-      setPricingRules(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-    }, (err) => {
-      console.error("Error fetching pricing rules in NewProjectTab:", err);
-      setPricingRules([]);
-    });
-
-    let cachedScopes: any[] = [];
-    let cachedPackages: any[] = [];
-
-    const syncScopesData = () => {
-      const combined = [...cachedScopes, ...cachedPackages];
-      const seen = new Set<string>();
-      const list: any[] = [];
-      for (const item of combined) {
-        const name = (item.name || item.packageName || item.title || "").trim();
-        if (name && !seen.has(name.toLowerCase())) {
-          seen.add(name.toLowerCase());
-          list.push({ ...item, name });
-        }
-      }
-      setScopesData(list);
-    };
-
-    const sq = query(collection(db, "scopes"));
-    const unsubS = onSnapshot(sq, (snapshot) => {
-      cachedScopes = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      syncScopesData();
-    }, (err) => {
-      console.error("Error fetching scopes in NewProjectTab:", err);
-    });
-
-    const pkQ = query(collection(db, "packages"));
-    const unsubPk = onSnapshot(pkQ, (snapshot) => {
-      cachedPackages = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      syncScopesData();
-    }, (err) => {
-      console.error("Error fetching packages in NewProjectTab:", err);
-    });
-
-    const prjQ = query(collection(db, COLLECTIONS.PROJECTS));
-    const unsubPrj = onSnapshot(prjQ, (snapshot) => {
-      setExistingProjects(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-    }, (err) => {
-      console.error("Error fetching projects for deduplication in NewProjectTab:", err);
-      setExistingProjects([]);
-    });
-
-    return () => {
-      unsub();
-      unsubD();
-      unsubU();
-      unsubP();
-      unsubS();
-      unsubPk();
-      unsubPrj();
-    };
-  }, [lockedEmail, currentUser]);
-
-  // Stricter Composite Match Condition:
-  // A project should ONLY be identified as an existing project / duplicate candidate if ALL four core attributes match simultaneously:
-  // 1. Client ID / Client Name EXACT MATCH (normalized)
-  // 2. Project Name EXACT MATCH (case-insensitive, trimmed: p.projectName.trim().toLowerCase() === newProjectName.trim().toLowerCase())
-  // 3. Plant Capacity EXACT MATCH (numerical value comparison: Number(p.capacity) === Number(newCapacity))
-  // 4. Location / Site Address EXACT MATCH (normalized text match)
+  // Deduplication check
   const matchedExistingProject = useMemo(() => {
-    const trimmedNewName = String(enteredProjectName || "").trim().toLowerCase();
-    const normalizeAddress = (s: any) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-    const trimmedNewLoc = normalizeAddress(enteredLocation);
+    const trimmedName = enteredProjectName.trim().toLowerCase();
+    const normalizeLoc = (s: any) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    const trimmedLoc = normalizeLoc(enteredLocation);
 
-    // If any core attribute is missing, it cannot be considered an existing duplicate
-    if (!selectedClientId || !trimmedNewName || !trimmedNewLoc) {
-      return null;
-    }
+    if (!selectedClientId || !trimmedName || !trimmedLoc) return null;
 
-    const selectedClient = clients.find(c => c.id === selectedClientId);
-    const selectedClientNameNorm = normalizeAddress(selectedClient?.name);
+    const selClient = clients.find(c => c.id === selectedClientId);
+    const selClientNorm = normalizeLoc(selClient?.companyName || selClient?.clientName || selClient?.name);
 
-    const newCapNum = (capacityValue !== null && capacityValue !== undefined && !isNaN(Number(capacityValue)) && String(capacityValue).trim() !== "")
+    const capNum = (capacityValue !== null && capacityValue !== undefined && !isNaN(Number(capacityValue)))
       ? Number(capacityValue)
       : null;
 
-    const match = existingProjects.find((p: any) => {
-      // 1. Client ID / Client Name EXACT MATCH (normalized)
-      const pClientId = p.clientId || "";
-      const pClientNameNorm = normalizeAddress(p.clientName);
-      const clientMatches = Boolean(
-        (selectedClientId && pClientId === selectedClientId) ||
-        (selectedClientNameNorm && pClientNameNorm && selectedClientNameNorm === pClientNameNorm)
-      );
-      if (!clientMatches) return false;
-
-      // 2. Project Name EXACT MATCH (case-insensitive, trimmed)
-      const pName = String(p.projectName || "").trim().toLowerCase();
-      if (pName !== trimmedNewName) return false;
-
-      // 3. Plant Capacity EXACT MATCH (numerical value comparison)
-      const pCapRaw = p.plantCapacity ?? p.capacity;
-      const pCapNum = (pCapRaw !== null && pCapRaw !== undefined && !isNaN(Number(pCapRaw)) && String(pCapRaw).trim() !== "")
-        ? Number(pCapRaw)
-        : null;
-
-      const capacityMatches = (newCapNum !== null && pCapNum !== null)
-        ? newCapNum === pCapNum
-        : (newCapNum === null && pCapNum === null);
-      if (!capacityMatches) return false;
-
-      // 4. Location / Site Address EXACT MATCH (normalized text match)
-      const pLocNorm = normalizeAddress(p.location);
-      if (!pLocNorm || pLocNorm !== trimmedNewLoc) return false;
-
-      // All four core attributes matched simultaneously!
+    return existingProjects.find((p: any) => {
+      const pClientMatch = (p.clientId === selectedClientId) || (normalizeLoc(p.clientName) === selClientNorm);
+      if (!pClientMatch) return false;
+      if ((p.projectName || "").trim().toLowerCase() !== trimmedName) return false;
+      const pCap = Number(p.plantCapacity ?? p.capacity);
+      if (capNum !== null && !isNaN(pCap) && pCap !== capNum) return false;
+      if (normalizeLoc(p.location) !== trimmedLoc) return false;
       return true;
-    });
-
-    return match || null;
+    }) || null;
   }, [existingProjects, selectedClientId, enteredProjectName, capacityValue, enteredLocation, clients]);
 
-  // Legitimate Scope Upgrade Condition:
-  // Only display the "UPGRADE PROJECT" banner if an existing project matches the exact Client,
-  // Project Name, Plant Capacity, AND Location, but has a different Scope of Work.
-  const isScopeUpgrade = useMemo(() => {
-    if (!matchedExistingProject || !selectedScope) return false;
-    const existingScope = String(matchedExistingProject.scopeOfWork || "").trim().toLowerCase();
-    const currentScope = String(selectedScope || "").trim().toLowerCase();
-    return Boolean(existingScope && currentScope && existingScope !== currentScope);
-  }, [matchedExistingProject, selectedScope]);
-
-  const isExactDuplicate = useMemo(() => {
-    if (!matchedExistingProject) return false;
-    if (!selectedScope) return true;
-    const existingScope = String(matchedExistingProject.scopeOfWork || "").trim().toLowerCase();
-    const currentScope = String(selectedScope || "").trim().toLowerCase();
-    return existingScope === currentScope;
-  }, [matchedExistingProject, selectedScope]);
+  const isScopeUpgrade = Boolean(
+    matchedExistingProject && 
+    selectedScope && 
+    String(matchedExistingProject.scopeOfWork || "").trim().toLowerCase() !== selectedScope.trim().toLowerCase()
+  );
 
   const onSubmit = async (data: any) => {
     if (!lockedEmail) return;
 
-    // Strictly disable creation if an exact duplicate or upgrade candidate exists
     if (matchedExistingProject) {
-      if (isScopeUpgrade) {
-        setErrorMsg("This project already exists in the central registry with a different Scope of Work. Please click 'Upgrade Project' to append new scopes.");
-      } else {
-        setErrorMsg("Exact duplicate project detected: This project already exists with the same Scope of Work. Creation is blocked to prevent duplication.");
-      }
+      setErrorMsg("This project already exists. Click 'Upgrade Project' to append scopes.");
       return;
     }
 
     setIsSubmitting(true);
     setErrorMsg("");
-    setScopeAssignmentErrors({});
-    
+
     try {
       const client = clients.find(c => c.id === data.clientId);
-      if (!client) throw new Error("Client not found or not approved");
+      if (!client) throw new Error("Client not found");
+      const clientName = client.companyName || client.clientName || client.name || "Client";
 
-      if (packageScopes.length === 0) {
-        throw new Error("Please select a Scope of Work");
-      }
-
-      // Validate that every scope in the package has an assigned designer
-      // Note: One person can be assigned to multiple scopes, or different people to different scopes
+      // Validate designer assignment
       const errorsMap: Record<string, string> = {};
-      for (const scope of packageScopes) {
-        if (!assignedScopes[scope.key] || !assignedScopes[scope.key].trim()) {
-          errorsMap[scope.key] = `Please assign a designer for ${scope.label}`;
+      packageScopes.forEach(s => {
+        if (!assignedScopes[s.key]) {
+          errorsMap[s.key] = `Please assign a designer for ${s.label}`;
         }
-      }
+      });
 
       if (Object.keys(errorsMap).length > 0) {
         setScopeAssignmentErrors(errorsMap);
-        throw new Error(`Please assign a designer to all scopes (${Object.keys(errorsMap).length} unassigned)`);
+        throw new Error("Please assign designers to all scope phases");
       }
 
-      // Build assignedScopes mapping strictly per schema: { preDesign: 'designerA@email.com', pvsyst: 'designerB@email.com' }
-      const assignedScopesClean: Record<string, string> = {};
+      const assignedClean: Record<string, string> = {};
       packageScopes.forEach(s => {
-        assignedScopesClean[s.key] = assignedScopes[s.key];
+        assignedClean[s.key] = assignedScopes[s.key];
       });
 
-      const firstScopeKey = packageScopes[0]?.key;
-      const primaryDesignerEmail = firstScopeKey ? assignedScopesClean[firstScopeKey] : "";
-      const primaryDesigner = designers.find(d => d.email === primaryDesignerEmail) || {
-        name: primaryDesignerEmail ? primaryDesignerEmail.split('@')[0] : "Assigned Designer",
-        email: primaryDesignerEmail
-      };
+      const firstScope = packageScopes[0]?.key;
+      const primaryEmail = firstScope ? assignedClean[firstScope] : "";
+      const primaryDesigner = designers.find(d => d.email === primaryEmail);
 
-      const modulesData = packageScopes.map(s => {
-        const dEmail = assignedScopesClean[s.key];
-        const dObj = designers.find(d => d.email === dEmail);
-        return {
-          phaseKey: s.key,
-          phaseName: s.label,
-          status: PROJECT_STATUS.NOT_STARTED,
-          assignedDesignerEmail: dEmail,
-          assignedDesignerName: dObj?.name || (dEmail ? dEmail.split('@')[0] : "Unassigned"),
-          startedAt: null,
-          completedAt: null
-        };
-      });
+      const pSnap = await getDocs(collection(db, "projects"));
+      const seq = (pSnap.size + 1).toString().padStart(3, '0');
+      const [year, month] = (data.date || getTodayDateString()).split('-');
+      const srNumber = `${generateClientInitials(clientName)}-${year}-${month}-${seq}`;
 
-      const pSnap = await getDocs(collection(db, COLLECTIONS.PROJECTS));
-      const totalProjects = pSnap.size;
-      
-      const selectedDateStr = data.date ? String(data.date).trim() : getTodayDateString();
-      const todayStr = getTodayDateString();
-      const isToday = selectedDateStr === todayStr;
-
-      let projectCreatedAt: any;
-      if (isToday) {
-        projectCreatedAt = serverTimestamp();
-      } else {
-        // Backdated/past date: set createdAt to match the selected historical date
-        // so date-based payroll and incentive lag logic accurately detects the month
-        const [pYear, pMonth, pDay] = selectedDateStr.split('-').map(Number);
-        const historicalDate = new Date(pYear, pMonth - 1, pDay, 12, 0, 0);
-        projectCreatedAt = Timestamp.fromDate(historicalDate);
-      }
-
-      const [year, month] = selectedDateStr.split('-');
-      
-      const sequence = (totalProjects + 1).toString().padStart(3, '0');
-      const initials = generateClientInitials(client.companyName);
-      const srNumber = `${initials}-${year}-${month}-${sequence}`;
+      const modulesData = packageScopes.map(s => ({
+        phaseKey: s.key,
+        phaseName: s.label,
+        status: "ASSIGNED",
+        assignedDesignerEmail: assignedClean[s.key],
+        assignedDesignerName: designers.find(d => d.email === assignedClean[s.key])?.name || assignedClean[s.key].split('@')[0],
+        startedAt: null,
+        completedAt: null
+      }));
 
       const payload = {
-        [PROJECT_FIELDS.PROJECT_NAME]: toTitleCase(data.projectName),
-        [PROJECT_FIELDS.PROJECT_NUMBER]: srNumber,
-        srNumber: srNumber,
-        [PROJECT_FIELDS.DATE]: selectedDateStr,
-        projectDate: selectedDateStr,
-        [PROJECT_FIELDS.CLIENT_ID]: client.id,
-        [PROJECT_FIELDS.CLIENT_NAME]: client.companyName,
-        [PROJECT_FIELDS.SCOPE_OF_WORK]: toTitleCase(data.scopeOfWork),
-        [PROJECT_FIELDS.SUB_SERVICE]: data.subService ? toTitleCase(data.subService) : 'Standard',
-        [PROJECT_FIELDS.PLANT_CAPACITY]: data.plantCapacity ? Number(data.plantCapacity) : null,
-        [PROJECT_FIELDS.CAPACITY_UNIT]: data.capacityUnit || 'KW',
-        [PROJECT_FIELDS.LOCATION]: toTitleCase(data.location),
-        [PROJECT_FIELDS.DESIGNER_EMAIL]: primaryDesigner.email,
-        designerName: primaryDesigner.name,
-        [PROJECT_FIELDS.ASSIGNED_SCOPES]: assignedScopesClean,
-        [PROJECT_FIELDS.MODULES]: modulesData,
-        remarks: data.remarks ? toTitleCase(data.remarks) : null,
+        projectName: toTitleCase(data.projectName),
+        projectNumber: srNumber,
+        srNumber,
+        date: data.date,
+        projectDate: data.date,
+        clientId: client.id,
+        clientName: toTitleCase(clientName),
+        scopeOfWork: data.scopeOfWork.trim(),
+        subService: data.subService || "Standard",
+        plantCapacity: (data.plantCapacity !== null && data.plantCapacity !== undefined && data.plantCapacity !== "") ? Number(data.plantCapacity) : null,
+        capacityUnit: data.capacityUnit || "KW",
+        location: toTitleCase(data.location),
+        designerEmail: primaryEmail,
+        designerName: primaryDesigner?.name || primaryEmail.split('@')[0],
+        assignedScopes: assignedClean,
+        modules: modulesData,
+        remarks: data.remarks || null,
         salesPersonEmail: lockedEmail,
-        salesPersonName: lockedEmail,
-        [PROJECT_FIELDS.STATUS]: PROJECT_STATUS.NOT_STARTED,
-        paymentStatus: 'UNPAID',
-        [PROJECT_FIELDS.PRICING_CATEGORY]: client.pricingCategory || 'T1',
-        proposalNumber: client.proposalNumber || '',
-        rate: calculatedPrice ? calculatedPrice.rate : null,
-        projectValue: calculatedPrice ? calculatedPrice.total : null,
-        projectCost: calculatedPrice ? calculatedPrice.total : null,
-        [PROJECT_FIELDS.CREATED_AT]: projectCreatedAt,
-        [PROJECT_FIELDS.UPDATED_AT]: serverTimestamp(),
+        salesPerson: currentUser?.name || lockedEmail,
+        status: "ASSIGNED",
+        paymentStatus: "PENDING",
+        pricingCategory: client.pricingCategory || "T1",
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
       };
-      
-      const projRef = await addDoc(collection(db, COLLECTIONS.PROJECTS), payload);
-      
-      // Audit log entry per Master Blueprint
-      try {
-        await addDoc(collection(db, COLLECTIONS.AUDIT_LOGS), {
-          action: "PROJECT_CREATED",
-          actor: lockedEmail,
-          target: payload[PROJECT_FIELDS.PROJECT_NAME],
-          details: {
-            projectId: projRef.id,
-            projectName: payload[PROJECT_FIELDS.PROJECT_NAME],
-            projectNumber: srNumber,
-            date: selectedDateStr,
-            clientName: client.companyName,
-            clientId: client.id,
-            scopeOfWork: payload[PROJECT_FIELDS.SCOPE_OF_WORK],
-            assignedScopes: assignedScopesClean,
-            modules: modulesData.map(m => ({ phaseKey: m.phaseKey, assignedDesigner: m.assignedDesignerEmail })),
-            plantCapacity: payload[PROJECT_FIELDS.PLANT_CAPACITY],
-            capacityUnit: payload[PROJECT_FIELDS.CAPACITY_UNIT],
-            location: payload[PROJECT_FIELDS.LOCATION],
-            designerEmail: primaryDesigner.email,
-            designerName: primaryDesigner.name
-          },
-          timestamp: serverTimestamp()
-        });
-      } catch (auditErr) {
-        console.warn("Audit log notice:", auditErr);
-      }
-      
-      confetti({
-        particleCount: 100,
-        spread: 70,
-        origin: { y: 0.6 },
-        colors: ['#D4AF37', '#1A1A1A', '#4A3728']
-      });
-      
-      reset({
-        capacityUnit: 'KW',
-        date: getTodayDateString(),
-        projectName: '',
-        clientId: '',
-        scopeOfWork: '',
-        subService: '',
-        plantCapacity: null,
-        location: '',
-        remarks: ''
-      });
+
+      await addDoc(collection(db, "projects"), sanitizeFirestorePayload(payload));
+
+      confetti({ particleCount: 100, spread: 70, origin: { y: 0.6 } });
+      reset();
       setAssignedScopes({});
-      
-      setTimeout(() => {
-        setActiveTab("my_projects");
-      }, 2000);
-      
+      setTimeout(() => setActiveTab("my_projects"), 1500);
     } catch (err: any) {
       setErrorMsg(err.message || "Failed to create project");
     } finally {
@@ -1537,361 +1320,176 @@ function NewProjectTab({ lockedEmail, setActiveTab, currentUser }: { lockedEmail
   };
 
   return (
-    <div className="w-full bg-white dark:bg-[#1E1E1E] p-4 sm:p-6 md:p-8 rounded-xl border border-gray-200 dark:border-[#333333] shadow-sm animate-in fade-in slide-in-from-bottom-4 duration-500">
+    <div className="w-full bg-white dark:bg-[#1E1E1E] p-5 sm:p-8 rounded-2xl border border-gray-200 dark:border-[#333333] shadow-sm animate-in fade-in duration-300">
       <h2 className="text-xl sm:text-2xl font-bold font-sans text-gray-900 dark:text-white mb-2">New Project Entry</h2>
-      <p className="text-gray-600 dark:text-gray-400 mb-6 text-sm sm:text-base">Submit a new project. Only your approved clients will appear in the dropdown.</p>
+      <p className="text-gray-600 dark:text-gray-400 mb-6 text-sm">Create and assign a new solar engineering project.</p>
 
       {errorMsg && (
-        <div className="mb-6 p-4 bg-rose-500/10 text-rose-600 dark:text-rose-400 rounded-lg flex items-start gap-2 border border-rose-500/30">
-          <AlertCircle className="w-5 h-5 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
-          <span className="text-sm sm:text-base font-medium">{errorMsg}</span>
+        <div className="mb-6 p-4 bg-rose-500/10 text-rose-600 dark:text-rose-400 rounded-xl flex items-start gap-2 border border-rose-500/30">
+          <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
+          <span className="text-sm font-medium">{errorMsg}</span>
         </div>
       )}
 
       <form onSubmit={handleSubmit(onSubmit)} className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6">
-        <div className="space-y-1">
-          <label className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-200">Client *</label>
-          <select {...register("clientId")} className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] outline-none">
-            <option value="">Select an approved client</option>
+        {/* Client Selection (Mapped directly from Admin Console /clients) */}
+        <div className="space-y-1.5">
+          <label className="text-xs font-semibold text-gray-700 dark:text-gray-200 uppercase tracking-wider">Client *</label>
+          <select {...register("clientId")} className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#141414] text-gray-900 dark:text-white outline-none focus:ring-2 focus:ring-[#D4AF37]">
+            <option value="">-- Choose Client ({clients.length} available) --</option>
             {clients.map(c => (
-              <option key={c.id} value={c.id}>{c.companyName}</option>
+              <option key={c.id} value={c.id}>
+                {c.companyName || c.clientName || c.name || "Client"}
+              </option>
             ))}
           </select>
-          {errors.clientId && <p className="text-sm text-rose-500">{errors.clientId.message as string}</p>}
+          {errors.clientId && <p className="text-xs text-rose-500">{errors.clientId.message}</p>}
         </div>
 
-        <div className="space-y-1">
-          <div className="flex items-center justify-between">
-            <label className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-200 flex items-center gap-1.5">
-              <Calendar className="w-4 h-4 text-amber-600 dark:text-[#D4AF37]" />
-              Project Date / Received Date *
-            </label>
-            <span className="text-xs text-gray-500 dark:text-gray-400">
-              Defaults to today
-            </span>
-          </div>
-          <input 
-            type="date" 
-            {...register("date")} 
-            className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] outline-none" 
-          />
-          {errors.date && <p className="text-sm text-rose-500">{errors.date.message as string}</p>}
+        <div className="space-y-1.5">
+          <label className="text-xs font-semibold text-gray-700 dark:text-gray-200 uppercase tracking-wider">Project Date *</label>
+          <input type="date" {...register("date")} className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#141414] text-gray-900 dark:text-white outline-none focus:ring-2 focus:ring-[#D4AF37]" />
         </div>
 
-        <div className="space-y-1 md:col-span-2">
-          <label className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-200">Project Name *</label>
-          <input 
-            type="text" 
-            placeholder="e.g. 50kW Rooftop Solar Installation" 
-            {...register("projectName")} 
-            className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] outline-none" 
-          />
-          {errors.projectName && <p className="text-sm text-rose-500">{errors.projectName.message as string}</p>}
+        <div className="space-y-1.5 md:col-span-2">
+          <label className="text-xs font-semibold text-gray-700 dark:text-gray-200 uppercase tracking-wider">Project Name / Site *</label>
+          <input type="text" placeholder="e.g. 50kW Rooftop Solar Installation" {...register("projectName")} className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#141414] text-gray-900 dark:text-white outline-none focus:ring-2 focus:ring-[#D4AF37]" />
+          {errors.projectName && <p className="text-xs text-rose-500">{errors.projectName.message}</p>}
         </div>
 
-        <div className="space-y-1">
-          <label className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-200">Scope of Work / Package *</label>
-          <select {...register("scopeOfWork")} className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] outline-none">
-            {uniqueScopes.length === 0 ? (
-              <option value="">No scopes available</option>
-            ) : (
-              <option value="">Select scope or multi-scope package</option>
-            )}
+        {/* Scope of Work Dropdown (Mapped dynamically from Admin Console Scopes & Packages) */}
+        <div className="space-y-1.5">
+          <label className="text-xs font-semibold text-gray-700 dark:text-gray-200 uppercase tracking-wider">Scope of Work / Package *</label>
+          <select {...register("scopeOfWork")} className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#141414] text-gray-900 dark:text-white outline-none focus:ring-2 focus:ring-[#D4AF37]">
+            <option value="">-- Choose Scope or Multi-Scope Package --</option>
             {uniqueScopes.map(s => <option key={s} value={s}>{s}</option>)}
           </select>
-          {errors.scopeOfWork && <p className="text-sm text-rose-500">{errors.scopeOfWork.message as string}</p>}
+          {errors.scopeOfWork && <p className="text-xs text-rose-500">{errors.scopeOfWork.message}</p>}
         </div>
 
-        {uniqueSubServices.length > 0 && (
-          <div className="space-y-1">
-            <label className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-200">Sub-Service</label>
-            <select {...register("subService")} className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] outline-none">
-              <option value="">Select sub-service (optional)</option>
-              {uniqueSubServices.map(s => <option key={s} value={s}>{s}</option>)}
+        {/* Dynamic Sub-Service dropdown if available on selected scope/package */}
+        {subServices.length > 0 && (
+          <div className="space-y-1.5">
+            <label className="text-xs font-semibold text-gray-700 dark:text-gray-200 uppercase tracking-wider">Sub-Service / Module</label>
+            <select {...register("subService")} className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#141414] text-gray-900 dark:text-white outline-none focus:ring-2 focus:ring-[#D4AF37]">
+              <option value="">-- Select Sub-Service (Optional) --</option>
+              {subServices.map(sub => (
+                <option key={sub} value={sub}>{sub}</option>
+              ))}
             </select>
-            {errors.subService && <p className="text-sm text-rose-500">{errors.subService.message as string}</p>}
           </div>
         )}
 
-        <div className="space-y-1">
-          <label className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-200">Plant Capacity</label>
+        <div className="space-y-1.5">
+          <label className="text-xs font-semibold text-gray-700 dark:text-gray-200 uppercase tracking-wider">Plant Capacity</label>
           <div className="flex gap-2">
-            <input type="number" step="0.01" min="0" placeholder="Leave blank if N/A" {...register("plantCapacity", { valueAsNumber: true, setValueAs: v => v === "" || isNaN(v) ? null : parseFloat(v) })} className="flex-1 p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] outline-none" />
-            <select {...register("capacityUnit")} className="w-24 p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] outline-none">
+            <input type="number" step="0.01" min="0" placeholder="e.g. 100" {...register("plantCapacity", { valueAsNumber: true })} className="flex-1 p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#141414] text-gray-900 dark:text-white outline-none focus:ring-2 focus:ring-[#D4AF37]" />
+            <select {...register("capacityUnit")} className="w-24 p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#141414] text-gray-900 dark:text-white outline-none">
               <option value="KW">KW</option>
               <option value="MW">MW</option>
             </select>
           </div>
-          {errors.plantCapacity && <p className="text-sm text-rose-500">{errors.plantCapacity.message as string}</p>}
         </div>
 
-        <div className="space-y-1">
-          <label className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-200">Location / Site Address *</label>
-          <input {...register("location")} placeholder="e.g. Plot 42, MIDC Industrial Area, Pune, Maharashtra" className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] outline-none" />
-          {errors.location && <p className="text-sm text-rose-500">{errors.location.message as string}</p>}
+        <div className="space-y-1.5 md:col-span-2">
+          <label className="text-xs font-semibold text-gray-700 dark:text-gray-200 uppercase tracking-wider">Location / Site Address *</label>
+          <input {...register("location")} placeholder="Plot 42, MIDC Industrial Area, Pune" className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#141414] text-gray-900 dark:text-white outline-none focus:ring-2 focus:ring-[#D4AF37]" />
+          {errors.location && <p className="text-xs text-rose-500">{errors.location.message}</p>}
         </div>
 
-        {/* Dynamic Scope Designer Assignment Section */}
-        {packageScopes.length > 1 ? (
-          <div className="md:col-span-2 space-y-4 p-4 sm:p-5 rounded-xl border border-amber-500/20 bg-amber-50/40 dark:bg-[#181818] shadow-sm">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-gray-200 dark:border-[#2A2A2A]">
-              <div>
-                <div className="flex items-center gap-2">
-                  <Users className="w-5 h-5 text-amber-600 dark:text-[#D4AF37]" />
-                  <h3 className="text-base sm:text-lg font-bold text-gray-900 dark:text-white">
-                    Multi-Stage Scope Assignment ({packageScopes.length} Scopes)
-                  </h3>
-                </div>
-                <p className="text-xs sm:text-sm text-gray-500 dark:text-gray-400 mt-0.5">
-                  Assign individual designers to each phase of this multi-scope package. One person can handle multiple scopes, or different people can be assigned per scope.
-                </p>
+        {/* Dynamic Multi-Stage Designer Assignment */}
+        {packageScopes.length > 0 && (
+          <div className="md:col-span-2 space-y-4 p-4 sm:p-5 rounded-xl border border-amber-500/20 bg-amber-50/30 dark:bg-[#181818]">
+            <div className="flex items-center justify-between pb-2 border-b border-gray-200 dark:border-[#2A2A2A]">
+              <div className="flex items-center gap-2">
+                <Users className="w-4 h-4 text-[#D4AF37]" />
+                <h3 className="text-sm font-bold text-gray-900 dark:text-white">Designer Scope Allocation</h3>
               </div>
-
-              {/* Quick Batch Assignment */}
-              {designers.length > 0 && (
-                <div className="flex items-center gap-2 shrink-0 bg-white dark:bg-[#202020] px-3 py-1.5 rounded-lg border border-gray-200 dark:border-[#333333]">
-                  <span className="text-xs font-semibold text-gray-600 dark:text-gray-300 whitespace-nowrap">
-                    Quick Assign All:
-                  </span>
+              {packageScopes.length > 1 && (
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="text-gray-500">Quick Assign All:</span>
                   <select
                     defaultValue=""
                     onChange={(e) => {
-                      if (e.target.value) {
-                        const batch: Record<string, string> = {};
-                        packageScopes.forEach(s => {
-                          batch[s.key] = e.target.value;
-                        });
-                        setAssignedScopes(batch);
-                        setScopeAssignmentErrors({});
-                      }
+                      if (!e.target.value) return;
+                      const batch: Record<string, string> = {};
+                      packageScopes.forEach(s => { batch[s.key] = e.target.value; });
+                      setAssignedScopes(batch);
+                      setScopeAssignmentErrors({});
                     }}
-                    className="text-xs py-1 px-2 rounded border border-gray-300 dark:border-[#3A3A3A] bg-gray-50 dark:bg-[#191919] text-gray-900 dark:text-white outline-none focus:ring-1 focus:ring-[#D4AF37]"
+                    className="p-1 rounded border border-gray-300 dark:border-[#333333] bg-white dark:bg-[#121212] text-xs outline-none"
                   >
-                    <option value="" disabled>Choose designer</option>
-                    {designers.map(d => (
-                      <option key={d.id} value={d.email}>{d.name} ({d.email})</option>
-                    ))}
+                    <option value="" disabled>Choose Designer</option>
+                    {designers.map(d => <option key={d.id} value={d.email}>{d.displayLabel || d.name}</option>)}
                   </select>
                 </div>
               )}
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              {packageScopes.map((scope) => {
-                const currentEmail = assignedScopes[scope.key] || "";
-                const scopeError = scopeAssignmentErrors[scope.key];
-                return (
-                  <div key={scope.key} className="space-y-1.5 p-3.5 rounded-lg bg-white dark:bg-[#202020] border border-gray-200 dark:border-[#2E2E2E] shadow-xs">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-semibold uppercase tracking-wider text-amber-600 dark:text-[#D4AF37] flex items-center gap-1.5">
-                        <span className="w-2 h-2 rounded-full bg-[#D4AF37]"></span>
-                        {scope.label} Scope
-                      </span>
-                      <span className="text-[11px] font-mono text-gray-400">key: {scope.key}</span>
-                    </div>
-                    <label className="text-sm font-medium text-gray-700 dark:text-gray-200 block">
-                      Assigned Designer *
-                    </label>
-                    <select
-                      value={currentEmail}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        setAssignedScopes(prev => ({ ...prev, [scope.key]: val }));
-                        if (val) {
-                          setScopeAssignmentErrors(prev => {
-                            const n = { ...prev };
-                            delete n[scope.key];
-                            return n;
-                          });
-                        }
-                      }}
-                      className={`w-full p-2.5 rounded-lg border ${
-                        scopeError ? 'border-rose-500 ring-1 ring-rose-500' : 'border-gray-300 dark:border-[#333333]'
-                      } bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white text-sm focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] outline-none`}
-                    >
-                      <option value="">Select designer for {scope.label}</option>
-                      {designers.map(d => (
-                        <option key={d.id} value={d.email}>
-                          {d.name} ({d.email})
-                        </option>
-                      ))}
-                    </select>
-                    {scopeError && <p className="text-xs text-rose-500 font-medium">{scopeError}</p>}
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        ) : packageScopes.length === 1 ? (
-          <div className="space-y-1 md:col-span-1">
-            <div className="flex items-center justify-between">
-              <label className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-200">
-                Designer ({packageScopes[0].label}) *
-              </label>
-              <span className="text-xs font-mono text-amber-600 dark:text-[#D4AF37]">{packageScopes[0].key}</span>
-            </div>
-            <select
-              value={assignedScopes[packageScopes[0].key] || ""}
-              onChange={(e) => {
-                const val = e.target.value;
-                setAssignedScopes({ [packageScopes[0].key]: val });
-                if (val) setScopeAssignmentErrors({});
-              }}
-              className={`w-full p-2.5 rounded-lg border ${
-                scopeAssignmentErrors[packageScopes[0].key] ? 'border-rose-500 ring-1 ring-rose-500' : 'border-gray-300 dark:border-[#2A2A2A]'
-              } bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] outline-none`}
-            >
-              <option value="">Select designer</option>
-              {designers.map(d => (
-                <option key={d.id} value={d.email}>{d.name} ({d.email})</option>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+              {packageScopes.map((scope) => (
+                <div key={scope.key} className="space-y-1.5 p-3 rounded-lg bg-white dark:bg-[#202020] border border-gray-200 dark:border-[#333333]">
+                  <span className="text-xs font-semibold text-amber-700 dark:text-[#D4AF37] block">{scope.label} Scope *</span>
+                  <select
+                    value={assignedScopes[scope.key] || ""}
+                    onChange={(e) => {
+                      setAssignedScopes(prev => ({ ...prev, [scope.key]: e.target.value }));
+                      setScopeAssignmentErrors(prev => {
+                        const n = { ...prev };
+                        delete n[scope.key];
+                        return n;
+                      });
+                    }}
+                    className="w-full p-2 rounded-lg border border-gray-300 dark:border-[#333333] bg-gray-50 dark:bg-[#161616] text-xs outline-none focus:ring-1 focus:ring-[#D4AF37]"
+                  >
+                    <option value="">Select designer for {scope.label}</option>
+                    {designers.map(d => <option key={d.id} value={d.email}>{d.displayLabel || d.name}</option>)}
+                  </select>
+                  {scopeAssignmentErrors[scope.key] && (
+                    <p className="text-[11px] text-rose-500 font-medium">{scopeAssignmentErrors[scope.key]}</p>
+                  )}
+                </div>
               ))}
-            </select>
-            {scopeAssignmentErrors[packageScopes[0].key] && (
-              <p className="text-sm text-rose-500">{scopeAssignmentErrors[packageScopes[0].key]}</p>
-            )}
-          </div>
-        ) : (
-          <div className="space-y-1 md:col-span-2 p-4 rounded-xl border border-dashed border-gray-300 dark:border-[#333333] text-center text-sm text-gray-500 dark:text-gray-400 bg-gray-50/50 dark:bg-[#191919]">
-            <Users className="w-5 h-5 mx-auto mb-1 text-gray-400" />
-            Please select a Scope of Work above to assign designers to scopes.
-          </div>
-        )}
-
-        <div className="space-y-1 md:col-span-2">
-          <label className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-200">Remarks / Notes (Optional)</label>
-          <textarea {...register("remarks")} rows={3} placeholder="Any special instructions for the designer..." className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] outline-none"></textarea>
-          {errors.remarks && <p className="text-sm text-rose-500">{errors.remarks.message as string}</p>}
-        </div>
-
-        <div className="space-y-1 md:col-span-2">
-          <label className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-200">Sales Person</label>
-          <input value={lockedEmail || ""} disabled className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-100 dark:bg-[#141414] text-gray-500 cursor-not-allowed outline-none font-medium" />
-        </div>
-
-        {calculatedPrice && (
-          <div className="md:col-span-2 bg-amber-500/10 border border-amber-500/30 p-4 rounded-lg flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 sm:gap-4 mt-2">
-            <div>
-              <p className="text-sm sm:text-base text-amber-600 dark:text-amber-400 font-semibold">Estimated Pricing ({calculatedPrice.category})</p>
-              <p className="text-xs sm:text-sm text-amber-700/80 dark:text-amber-400/80 mt-0.5">Based on {selectedScope} {selectedSubService ? `- ${selectedSubService}` : ''} ({capacityValue} {capacityUnit})</p>
-            </div>
-            <div className="text-left sm:text-right">
-              <p className="text-xs sm:text-sm text-gray-500 dark:text-gray-400">Rate: ₹{calculatedPrice.rate.toLocaleString('en-IN')}</p>
-              <p className="text-lg sm:text-xl font-bold text-gray-900 dark:text-white">Total: ₹{calculatedPrice.total.toLocaleString('en-IN')}</p>
             </div>
           </div>
         )}
 
-        {/* Search-First Deduplication Gate Alert: Legitimate Scope Upgrade */}
-        {matchedExistingProject && isScopeUpgrade && (
-          <div className="md:col-span-2 p-4 sm:p-5 rounded-xl border border-amber-500/50 bg-[#141414] text-white shadow-xl animate-in fade-in slide-in-from-top-2 duration-300">
-            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-              <div className="flex items-start gap-3.5">
-                <div className="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center shrink-0 mt-0.5 text-[#D4AF37]">
-                  <Sparkles className="w-5 h-5" />
-                </div>
-                <div className="space-y-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-base sm:text-lg font-bold text-white tracking-wide">
-                      Project Already Exists
-                    </span>
-                    <span className="px-2 py-0.5 text-xs font-mono font-bold rounded bg-amber-500/20 text-[#D4AF37] border border-amber-500/30">
-                      {matchedExistingProject.projectNumber || matchedExistingProject.srNumber || "REGISTERED"}
-                    </span>
-                  </div>
-                  <p className="text-xs sm:text-sm text-gray-300">
-                    A project matching <span className="font-semibold text-white">&quot;{matchedExistingProject.projectName}&quot;</span> (Client: <span className="text-white font-semibold">{matchedExistingProject.clientName}</span>, Location: <span className="text-white font-semibold">{matchedExistingProject.location}</span>) is already registered with scope <span className="text-amber-400 font-semibold">&quot;{matchedExistingProject.scopeOfWork || "Standard"}&quot;</span>.
-                  </p>
-                  <p className="text-xs text-amber-400/90 pt-1">
-                    You have selected a different Scope of Work (&quot;{selectedScope}&quot;). Click <strong>Upgrade Project</strong> to append this new scope to the existing project instead of creating a duplicate.
-                  </p>
-                  <div className="flex flex-wrap items-center gap-2 pt-1 text-xs text-gray-400">
-                    <span>Registered Scope:</span>
-                    <span className="font-mono text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20">
-                      {matchedExistingProject.scopeOfWork || "Standard"}
-                    </span>
-                    {matchedExistingProject.plantCapacity && (
-                      <span className="text-gray-400 font-mono">
-                        • {matchedExistingProject.plantCapacity} {matchedExistingProject.capacityUnit || "KW"}
-                      </span>
-                    )}
-                  </div>
-                </div>
+        {/* Deduplication Alert / Upgrade Button */}
+        {matchedExistingProject && (
+          <div className="md:col-span-2 p-4 rounded-xl border border-amber-500/50 bg-amber-500/10 flex items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <Sparkles className="w-5 h-5 text-[#D4AF37] shrink-0" />
+              <div>
+                <h4 className="text-sm font-bold text-gray-900 dark:text-white">Existing Project Match Detected</h4>
+                <p className="text-xs text-gray-600 dark:text-gray-300">
+                  {matchedExistingProject.projectName} ({matchedExistingProject.clientName}) already exists with scope: {matchedExistingProject.scopeOfWork}.
+                </p>
               </div>
-
+            </div>
+            {isScopeUpgrade && (
               <button
                 type="button"
                 onClick={() => setIsUpgradeModalOpen(true)}
-                className="w-full sm:w-auto shrink-0 px-5 py-2.5 bg-[#D4AF37] hover:bg-[#c59f2e] active:scale-[0.98] text-black font-bold rounded-lg shadow-md transition-all flex items-center justify-center gap-2 text-sm uppercase tracking-wide cursor-pointer"
+                className="px-4 py-2 bg-[#D4AF37] text-black font-bold rounded-lg text-xs whitespace-nowrap cursor-pointer hover:bg-[#c59f2e]"
               >
-                <Sparkles className="w-4 h-4" />
-                <span>Upgrade Project</span>
+                Upgrade Project Scope
               </button>
-            </div>
+            )}
           </div>
         )}
 
-        {/* Search-First Deduplication Gate Alert: Exact Duplicate */}
-        {matchedExistingProject && isExactDuplicate && (
-          <div className="md:col-span-2 p-4 sm:p-5 rounded-xl border border-rose-500/50 bg-[#141414] text-white shadow-xl animate-in fade-in slide-in-from-top-2 duration-300">
-            <div className="flex items-start gap-3.5">
-              <div className="w-10 h-10 rounded-xl bg-rose-500/20 border border-rose-500/40 flex items-center justify-center shrink-0 mt-0.5 text-rose-400">
-                <AlertCircle className="w-5 h-5" />
-              </div>
-              <div className="space-y-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-base sm:text-lg font-bold text-white tracking-wide">
-                    Exact Duplicate Project Detected
-                  </span>
-                  <span className="px-2 py-0.5 text-xs font-mono font-bold rounded bg-rose-500/20 text-rose-300 border border-rose-500/30">
-                    {matchedExistingProject.projectNumber || matchedExistingProject.srNumber || "REGISTERED"}
-                  </span>
-                </div>
-                <p className="text-xs sm:text-sm text-gray-300">
-                  A project matching <span className="font-semibold text-white">&quot;{matchedExistingProject.projectName}&quot;</span> with the exact same Client, Capacity ({matchedExistingProject.plantCapacity || "N/A"} {matchedExistingProject.capacityUnit || ""}), Location, and Scope of Work (&quot;{matchedExistingProject.scopeOfWork}&quot;) is already registered in the central database.
-                </p>
-                <p className="text-xs text-rose-400 pt-1">
-                  Creation is blocked to prevent duplication. If you need to request additional scopes, please select a different Scope of Work above.
-                </p>
-              </div>
-            </div>
-          </div>
-        )}
-
-        <div className="md:col-span-2 flex justify-end mt-2 sm:mt-4">
+        <div className="md:col-span-2 flex justify-end pt-2">
           <button
             type="submit"
             disabled={isSubmitting || !!matchedExistingProject}
-            className={`w-full sm:w-auto px-6 py-2.5 font-semibold rounded-lg transition-all flex items-center justify-center gap-2 shadow-sm ${
-              matchedExistingProject
-                ? "bg-gray-300 dark:bg-[#2A2A2A] text-gray-500 cursor-not-allowed border border-gray-400 dark:border-[#3A3A3A]"
-                : "bg-[#D4AF37] text-black hover:opacity-90 cursor-pointer focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] focus:ring-offset-2"
-            }`}
+            className="px-6 py-2.5 bg-[#D4AF37] hover:bg-[#c59f2e] text-black font-bold rounded-lg transition-all flex items-center gap-2 cursor-pointer disabled:opacity-50"
           >
-            {isSubmitting ? (
-              <>
-                <Loader2 className="w-5 h-5 animate-spin" />
-                <span>Submitting Project...</span>
-              </>
-            ) : matchedExistingProject ? (
-              <>
-                <Lock className="w-4 h-4 text-gray-500" />
-                <span>
-                  {isScopeUpgrade
-                    ? "Submission Blocked: Use Upgrade Project"
-                    : "Submission Blocked: Exact Duplicate Exists"}
-                </span>
-              </>
-            ) : (
-              <>
-                <FileText className="w-5 h-5" />
-                <span>Submit Project</span>
-              </>
-            )}
+            {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4" />}
+            Submit Project
           </button>
         </div>
       </form>
 
-      {/* Upgrade Project Modal for Deduplication Pathway */}
       {isUpgradeModalOpen && matchedExistingProject && (
         <UpgradeProjectModal
           isOpen={isUpgradeModalOpen}
@@ -1904,1353 +1502,166 @@ function NewProjectTab({ lockedEmail, setActiveTab, currentUser }: { lockedEmail
           onSuccess={(msg) => {
             setToastMsg(msg);
             reset();
-            setAssignedScopes({});
-            setTimeout(() => {
-              setActiveTab("my_projects");
-            }, 1500);
+            setTimeout(() => setActiveTab("my_projects"), 1200);
           }}
         />
-      )}
-
-      {toastMsg && (
-        <div className="fixed bottom-6 right-6 z-50 p-4 bg-emerald-500 text-white rounded-lg shadow-xl flex items-center gap-3 animate-in slide-in-from-bottom duration-300 border border-emerald-600">
-          <CheckCircle2 className="w-5 h-5 shrink-0 text-white" />
-          <span className="font-semibold text-sm sm:text-base">{toastMsg}</span>
-        </div>
       )}
     </div>
   );
 }
 
+// --- MY PROJECTS TAB ---
 function MyProjectsTab({ lockedEmail, currentUser }: { lockedEmail: string | null; currentUser: any }) {
-  // Strict initial empty state - never inject fallback or dummy test data
   const [projects, setProjects] = useState<any[]>([]);
-  const [loading, setLoading] = useState<boolean>(() => Boolean(lockedEmail && currentUser));
-  const [selectedProject, setSelectedProject] = useState<any | null>(null);
-  const [projectToUpgrade, setProjectToUpgrade] = useState<any | null>(null);
-  const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
   const [designers, setDesigners] = useState<any[]>([]);
   const [scopesData, setScopesData] = useState<any[]>([]);
-  const [searchQuery, setSearchQuery] = useState("");
-
-  // Sorting state - default strictly descending by date (newest first)
-  const [sortField, setSortField] = useState<'date' | 'projectNumber' | 'clientName' | 'projectName' | 'scopeOfWork' | 'plantCapacity' | 'designer' | 'status'>('date');
-  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
-
-  // Column header filter states
-  const [showColumnFilters, setShowColumnFilters] = useState(true);
-  const [filterSrNo, setFilterSrNo] = useState("");
-  const [filterDate, setFilterDate] = useState("");
-  const [filterClient, setFilterClient] = useState("");
-  const [filterProjectName, setFilterProjectName] = useState("");
-  const [filterScope, setFilterScope] = useState("");
-  const [filterCapacity, setFilterCapacity] = useState("");
-  const [filterDesigner, setFilterDesigner] = useState("");
-  const [filterStatus, setFilterStatus] = useState("");
-
-  // Pagination state (strictly 15 items per page)
-  const PAGE_SIZE = 15;
-  const [currentPage, setCurrentPage] = useState<number>(1);
-
-  const showToast = (msg: string) => {
-    setToastMsg(msg);
-    setTimeout(() => {
-      setToastMsg(null);
-    }, 4000);
-  };
+  const [projectToUpgrade, setProjectToUpgrade] = useState<any | null>(null);
 
   useEffect(() => {
-    // Strictly defer data fetching until Firebase currentUser is defined and loaded
-    if (!currentUser || !lockedEmail) {
-      return;
-    }
+    if (!lockedEmail) return;
 
-    const SUPER_ADMIN_EMAILS = ['jayjalpa2002@gmail.com', 'jay.solarithm@gmail.com'];
-    const isSuperAdmin = SUPER_ADMIN_EMAILS.includes(lockedEmail.toLowerCase().trim());
-
-    // Fetch directly from live central Firebase projects collection
-    const q = isSuperAdmin
-      ? query(collection(db, COLLECTIONS.PROJECTS))
-      : query(
-          collection(db, COLLECTIONS.PROJECTS),
-          where("salesPersonEmail", "==", lockedEmail)
-        );
+    const isAdmin = ["owner", "admin"].includes(currentUser?.role);
+    const q = isAdmin 
+      ? query(collection(db, "projects"))
+      : query(collection(db, "projects"), where("salesPersonEmail", "==", lockedEmail));
 
     const unsub = onSnapshot(q, (snapshot) => {
-      if (snapshot.empty) {
-        // Strict empty state when central database returns 0 projects
-        setProjects([]);
-        setLoading(false);
-        return;
-      }
-      try {
-        const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        data.sort((a: any, b: any) => getProjectTimestampMillis(b) - getProjectTimestampMillis(a));
-        setProjects(data);
-      } catch (sortErr) {
-        console.error("Error sorting projects in MyProjectsTab:", sortErr);
-        const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        setProjects(data);
-      } finally {
-        setLoading(false);
-      }
-    }, (err) => {
-      console.error("Failed to query central projects collection:", err);
-      setProjects([]);
+      const data = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+      data.sort((a: any, b: any) => getProjectTimestampMillis(b) - getProjectTimestampMillis(a));
+      setProjects(data);
       setLoading(false);
-    });
+    }, () => setLoading(false));
+
     return () => unsub();
   }, [lockedEmail, currentUser]);
 
   useEffect(() => {
-    // Strictly defer designer lookup until auth session is active
-    if (!currentUser) {
-      return;
-    }
+    let cachedEmp: any[] = [];
+    let cachedUsers: any[] = [];
+    const sync = () => setDesigners(filterAndDeduplicateDesigners(cachedEmp, cachedUsers));
 
-    // Fetch active designers from both employees and users collections
-    let cachedEmpDocs: any[] = [];
-    let cachedUserDocs: any[] = [];
+    const unsubEmp = onSnapshot(collection(db, "employees"), snap => {
+      cachedEmp = snap.docs;
+      sync();
+    }, () => {});
 
-    const syncDesigners = () => {
-      const activeDesigners = filterAndDeduplicateDesigners(cachedEmpDocs, cachedUserDocs);
-      setDesigners(activeDesigners);
-    };
-
-    const eq = query(collection(db, COLLECTIONS.EMPLOYEES));
-    const unsubD = onSnapshot(eq, (snapshot) => {
-      cachedEmpDocs = snapshot.docs;
-      syncDesigners();
-    }, (err) => {
-      console.error("Failed to query employees roster in MyProjectsTab:", err);
-    });
-
-    const uq = query(collection(db, COLLECTIONS.USERS));
-    const unsubU = onSnapshot(uq, (snapshot) => {
-      cachedUserDocs = snapshot.docs;
-      syncDesigners();
-    }, (err) => {
-      console.error("Failed to query users roster in MyProjectsTab:", err);
-    });
+    const unsubUsers = onSnapshot(collection(db, "users"), snap => {
+      cachedUsers = snap.docs;
+      sync();
+    }, () => {});
 
     return () => {
-      unsubD();
-      unsubU();
+      unsubEmp();
+      unsubUsers();
     };
-  }, [currentUser]);
+  }, []);
 
-  // Fetch available scopes and packages dynamically from Firestore for Upgrade Project
   useEffect(() => {
-    let cachedScopes: any[] = [];
-    let cachedPackages: any[] = [];
+    let sList: any[] = [];
+    let pkList: any[] = [];
+    let prList: any[] = [];
 
-    const syncScopesData = () => {
-      const combined = [...cachedScopes, ...cachedPackages];
+    const sync = () => {
+      const combined = [...sList, ...pkList, ...prList];
       const seen = new Set<string>();
-      const list: any[] = [];
+      const res: any[] = [];
       for (const item of combined) {
-        const name = (item.name || item.packageName || item.title || "").trim();
-        if (name && !seen.has(name.toLowerCase())) {
-          seen.add(name.toLowerCase());
-          list.push({ ...item, name });
+        const name = (item.name || item.packageName || item.title || item.label || item.scopeName || item.scope || item.serviceName || "").trim();
+        if (!name) continue;
+        const key = normalizeScopeDeduplicationKey(name);
+        if (!seen.has(key)) {
+          seen.add(key);
+          res.push({ ...item, name });
         }
       }
-      setScopesData(list);
+      setScopesData(res);
     };
 
-    const sq = query(collection(db, COLLECTIONS.SCOPES));
-    const unsubS = onSnapshot(sq, (snap) => {
-      cachedScopes = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-      syncScopesData();
-    }, (err) => {
-      console.error("Failed to query scopes in MyProjectsTab:", err);
-    });
+    const unsubS = onSnapshot(collection(db, "scopes"), snap => {
+      sList = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      sync();
+    }, () => {});
 
-    const pkQ = query(collection(db, "packages"));
-    const unsubPk = onSnapshot(pkQ, (snap) => {
-      cachedPackages = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-      syncScopesData();
-    }, (err) => {
-      console.error("Failed to query packages in MyProjectsTab:", err);
-    });
+    const unsubPk = onSnapshot(collection(db, "packages"), snap => {
+      pkList = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      sync();
+    }, () => {});
+
+    const unsubPr = onSnapshot(collection(db, "pricingRules"), snap => {
+      prList = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      sync();
+    }, () => {});
 
     return () => {
       unsubS();
       unsubPk();
+      unsubPr();
     };
   }, []);
 
-  const handleReassignDesigner = async (projectId: string, designerEmail: string) => {
-    const selectedDesigner = designers.find(d => d.email === designerEmail);
-    if (!selectedDesigner) return;
-
-    try {
-      const projectRef = doc(db, COLLECTIONS.PROJECTS, projectId);
-      const proj = projects.find(p => p.id === projectId);
-      
-      const updateData: any = {
-        [PROJECT_FIELDS.DESIGNER_EMAIL]: designerEmail,
-        designerName: selectedDesigner.name,
-        [PROJECT_FIELDS.UPDATED_AT]: serverTimestamp()
-      };
-
-      // If single scope assignedScopes exists, keep it in sync
-      if (proj?.assignedScopes && Object.keys(proj.assignedScopes).length === 1) {
-        const singleKey = Object.keys(proj.assignedScopes)[0];
-        updateData[PROJECT_FIELDS.ASSIGNED_SCOPES] = { [singleKey]: designerEmail };
-      }
-
-      await updateDoc(projectRef, updateData);
-
-      // Audit trail per Master Blueprint
-      try {
-        await addDoc(collection(db, COLLECTIONS.AUDIT_LOGS), {
-          action: "PROJECT_DESIGNER_REASSIGNED",
-          actor: lockedEmail,
-          target: projectId,
-          details: { designerEmail: selectedDesigner.email, designerName: selectedDesigner.name },
-          timestamp: serverTimestamp()
-        });
-      } catch (auditErr) {
-        console.warn("Audit log notice:", auditErr);
-      }
-
-      showToast("Designer successfully reassigned");
-    } catch (err: any) {
-      console.error("Failed to reassign designer:", err);
-      showToast("Error reassigning designer: " + err.message);
-    }
-  };
-
-  const handleReassignScopeDesigner = async (projectId: string, scopeKey: string, newEmail: string) => {
-    const selectedDesigner = designers.find(d => d.email === newEmail);
-    if (!selectedDesigner) return;
-
-    try {
-      const proj = projects.find(p => p.id === projectId);
-      const existingScopes = proj?.assignedScopes || {};
-      const updatedScopes = { ...existingScopes, [scopeKey]: newEmail };
-      
-      const projectRef = doc(db, COLLECTIONS.PROJECTS, projectId);
-      const updateData: any = {
-        [PROJECT_FIELDS.ASSIGNED_SCOPES]: updatedScopes,
-        [PROJECT_FIELDS.UPDATED_AT]: serverTimestamp()
-      };
-
-      // Also update modules array if present
-      if (Array.isArray(proj?.modules)) {
-        updateData.modules = proj.modules.map((m: any) => {
-          if (m.phaseKey === scopeKey) {
-            return {
-              ...m,
-              assignedDesignerEmail: newEmail,
-              assignedDesignerName: selectedDesigner.name
-            };
-          }
-          return m;
-        });
-      }
-
-      await updateDoc(projectRef, updateData);
-
-      // Audit log per blueprint
-      try {
-        await addDoc(collection(db, COLLECTIONS.AUDIT_LOGS), {
-          action: "PROJECT_SCOPE_DESIGNER_REASSIGNED",
-          actor: lockedEmail,
-          target: projectId,
-          details: {
-            scopeKey,
-            designerEmail: newEmail,
-            designerName: selectedDesigner.name
-          },
-          timestamp: serverTimestamp()
-        });
-      } catch (auditErr) {
-        console.warn("Audit log notice:", auditErr);
-      }
-
-      showToast(`Designer for ${scopeKey} updated to ${selectedDesigner.name}`);
-    } catch (err: any) {
-      console.error("Failed to reassign scope designer:", err);
-      showToast("Error reassigning scope designer: " + err.message);
-    }
-  };
-
-  const handleSort = (field: 'date' | 'projectNumber' | 'clientName' | 'projectName' | 'scopeOfWork' | 'plantCapacity' | 'designer' | 'status') => {
-    if (sortField === field) {
-      setSortDirection(prev => (prev === 'desc' ? 'asc' : 'desc'));
-    } else {
-      setSortField(field);
-      setSortDirection(field === 'date' ? 'desc' : 'asc');
-    }
-  };
-
-  const activeFiltersCount = useMemo(() => {
-    let count = 0;
-    if (filterSrNo.trim()) count++;
-    if (filterDate.trim()) count++;
-    if (filterClient.trim()) count++;
-    if (filterProjectName.trim()) count++;
-    if (filterScope.trim()) count++;
-    if (filterCapacity.trim()) count++;
-    if (filterDesigner.trim()) count++;
-    if (filterStatus.trim()) count++;
-    return count;
-  }, [filterSrNo, filterDate, filterClient, filterProjectName, filterScope, filterCapacity, filterDesigner, filterStatus]);
-
-  const clearAllFilters = () => {
-    setSearchQuery("");
-    setFilterSrNo("");
-    setFilterDate("");
-    setFilterClient("");
-    setFilterProjectName("");
-    setFilterScope("");
-    setFilterCapacity("");
-    setFilterDesigner("");
-    setFilterStatus("");
-    setSortField('date');
-    setSortDirection('desc');
-    setCurrentPage(1);
-  };
-
-  const uniqueClients = useMemo(() => {
-    const set = new Set<string>();
-    projects.forEach(p => {
-      if (p.clientName) set.add(p.clientName.trim());
-    });
-    return Array.from(set).sort((a, b) => a.localeCompare(b));
-  }, [projects]);
-
-  const uniqueScopes = useMemo(() => {
-    const set = new Set<string>();
-    projects.forEach(p => {
-      if (p.scopeOfWork) set.add(p.scopeOfWork.trim());
-    });
-    return Array.from(set).sort((a, b) => a.localeCompare(b));
-  }, [projects]);
-
-  const uniqueStatuses = useMemo(() => {
-    const set = new Set<string>();
-    projects.forEach(p => {
-      if (p.status) set.add(p.status.trim());
-    });
-    return Array.from(set).sort((a, b) => a.localeCompare(b));
-  }, [projects]);
-
-  const handleSearchChange = (val: string) => {
-    setSearchQuery(val);
-    setCurrentPage(1);
-  };
-
-  const handleFilterSrNoChange = (val: string) => {
-    setFilterSrNo(val);
-    setCurrentPage(1);
-  };
-
-  const handleFilterDateChange = (val: string) => {
-    setFilterDate(val);
-    setCurrentPage(1);
-  };
-
-  const handleFilterClientChange = (val: string) => {
-    setFilterClient(val);
-    setCurrentPage(1);
-  };
-
-  const handleFilterProjectNameChange = (val: string) => {
-    setFilterProjectName(val);
-    setCurrentPage(1);
-  };
-
-  const handleFilterScopeChange = (val: string) => {
-    setFilterScope(val);
-    setCurrentPage(1);
-  };
-
-  const handleFilterCapacityChange = (val: string) => {
-    setFilterCapacity(val);
-    setCurrentPage(1);
-  };
-
-  const handleFilterDesignerChange = (val: string) => {
-    setFilterDesigner(val);
-    setCurrentPage(1);
-  };
-
-  const handleFilterStatusChange = (val: string) => {
-    setFilterStatus(val);
-    setCurrentPage(1);
-  };
-
-  const filteredProjects = useMemo(() => {
-    let result = [...projects];
-
-    // Global Search Filter
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase().trim();
-      result = result.filter(p => {
-        const clientName = (p.clientName || "").toLowerCase();
-        const projectNumber = (p.projectNumber || p.srNumber || "").toLowerCase();
-        const projectName = (p.projectName || p[PROJECT_FIELDS.PROJECT_NAME] || "").toLowerCase();
-        const projectDate = (p.date || p.projectDate || getProjectDisplayDate(p) || "").toLowerCase();
-        const scope = (p.scopeOfWork || "").toLowerCase();
-        const designer = (p.designerEmail || p.designerName || "").toLowerCase();
-        const status = (p.status || "").toLowerCase();
-        return (
-          clientName.includes(q) ||
-          projectNumber.includes(q) ||
-          projectName.includes(q) ||
-          projectDate.includes(q) ||
-          scope.includes(q) ||
-          designer.includes(q) ||
-          status.includes(q)
-        );
-      });
-    }
-
-    // Column Filters
-    if (filterSrNo.trim()) {
-      const q = filterSrNo.toLowerCase().trim();
-      result = result.filter(p => (p.projectNumber || p.srNumber || "").toLowerCase().includes(q));
-    }
-
-    if (filterDate.trim()) {
-      const q = filterDate.toLowerCase().trim();
-      result = result.filter(p => {
-        const d = (p.date || p.projectDate || getProjectDisplayDate(p) || "").toLowerCase();
-        return d.includes(q);
-      });
-    }
-
-    if (filterClient.trim()) {
-      const q = filterClient.toLowerCase().trim();
-      result = result.filter(p => (p.clientName || "").toLowerCase().trim() === q);
-    }
-
-    if (filterProjectName.trim()) {
-      const q = filterProjectName.toLowerCase().trim();
-      result = result.filter(p => (p.projectName || p[PROJECT_FIELDS.PROJECT_NAME] || "").toLowerCase().includes(q));
-    }
-
-    if (filterScope.trim()) {
-      const q = filterScope.toLowerCase().trim();
-      result = result.filter(p => (p.scopeOfWork || "").toLowerCase().trim() === q);
-    }
-
-    if (filterCapacity.trim()) {
-      const q = filterCapacity.toLowerCase().trim();
-      result = result.filter(p => {
-        const cap = p.plantCapacity ? `${p.plantCapacity} ${p.capacityUnit || 'KW'}`.toLowerCase() : "";
-        return cap.includes(q) || String(p.plantCapacity || "").includes(q);
-      });
-    }
-
-    if (filterDesigner.trim()) {
-      const q = filterDesigner.toLowerCase().trim();
-      result = result.filter(p => {
-        if (q === "unassigned") {
-          return !p.designerEmail && (!p.assignedScopes || Object.keys(p.assignedScopes).length === 0);
-        }
-        const desEmail = (p.designerEmail || "").toLowerCase();
-        const desName = (p.designerName || "").toLowerCase();
-        const scopesMatch = p.assignedScopes && Object.values(p.assignedScopes).some((val: any) => String(val).toLowerCase().includes(q));
-        return desEmail.includes(q) || desName.includes(q) || scopesMatch;
-      });
-    }
-
-    if (filterStatus.trim()) {
-      const q = filterStatus.toLowerCase().trim();
-      result = result.filter(p => (p.status || "").toLowerCase().trim() === q);
-    }
-
-    // Strict Sorting Logic - default newest first
-    result.sort((a: any, b: any) => {
-      if (sortField === 'date') {
-        const aT = getProjectTimestampMillis(a);
-        const bT = getProjectTimestampMillis(b);
-        return sortDirection === 'desc' ? bT - aT : aT - bT;
-      }
-      if (sortField === 'projectNumber') {
-        const aNum = (a.projectNumber || a.srNumber || '').toString();
-        const bNum = (b.projectNumber || b.srNumber || '').toString();
-        const cmp = aNum.localeCompare(bNum, undefined, { numeric: true, sensitivity: 'base' });
-        return sortDirection === 'desc' ? -cmp : cmp;
-      }
-      if (sortField === 'clientName') {
-        const aVal = (a.clientName || '').toString();
-        const bVal = (b.clientName || '').toString();
-        const cmp = aVal.localeCompare(bVal);
-        return sortDirection === 'desc' ? -cmp : cmp;
-      }
-      if (sortField === 'projectName') {
-        const aVal = (a.projectName || a[PROJECT_FIELDS.PROJECT_NAME] || '').toString();
-        const bVal = (b.projectName || b[PROJECT_FIELDS.PROJECT_NAME] || '').toString();
-        const cmp = aVal.localeCompare(bVal);
-        return sortDirection === 'desc' ? -cmp : cmp;
-      }
-      if (sortField === 'scopeOfWork') {
-        const aVal = (a.scopeOfWork || '').toString();
-        const bVal = (b.scopeOfWork || '').toString();
-        const cmp = aVal.localeCompare(bVal);
-        return sortDirection === 'desc' ? -cmp : cmp;
-      }
-      if (sortField === 'plantCapacity') {
-        const aVal = Number(a.plantCapacity) || 0;
-        const bVal = Number(b.plantCapacity) || 0;
-        return sortDirection === 'desc' ? bVal - aVal : aVal - bVal;
-      }
-      if (sortField === 'designer') {
-        const getDesignerStr = (pObj: any) => {
-          if (pObj.designerName) return pObj.designerName;
-          if (pObj.designerEmail) return pObj.designerEmail;
-          if (pObj.assignedScopes && Object.keys(pObj.assignedScopes).length > 0) {
-            return Object.values(pObj.assignedScopes).join(', ');
-          }
-          return '';
-        };
-        const aVal = getDesignerStr(a);
-        const bVal = getDesignerStr(b);
-        const cmp = aVal.localeCompare(bVal);
-        return sortDirection === 'desc' ? -cmp : cmp;
-      }
-      if (sortField === 'status') {
-        const aVal = (a.status || '').toString();
-        const bVal = (b.status || '').toString();
-        const cmp = aVal.localeCompare(bVal);
-        return sortDirection === 'desc' ? -cmp : cmp;
-      }
-      return 0;
-    });
-
-    return result;
-  }, [
-    projects,
-    searchQuery,
-    filterSrNo,
-    filterDate,
-    filterClient,
-    filterProjectName,
-    filterScope,
-    filterCapacity,
-    filterDesigner,
-    filterStatus,
-    sortField,
-    sortDirection
-  ]);
-
-  const totalPages = Math.max(1, Math.ceil(filteredProjects.length / PAGE_SIZE));
-  const safeCurrentPage = Math.min(Math.max(1, currentPage), totalPages);
-
-  const paginatedProjects = useMemo(() => {
-    const startIndex = (safeCurrentPage - 1) * PAGE_SIZE;
-    return filteredProjects.slice(startIndex, startIndex + PAGE_SIZE);
-  }, [filteredProjects, safeCurrentPage]);
-
-  const pageNumbers = useMemo(() => {
-    if (totalPages <= 7) {
-      return Array.from({ length: totalPages }, (_, i) => i + 1);
-    }
-    const pages: (number | string)[] = [];
-    if (safeCurrentPage <= 4) {
-      pages.push(1, 2, 3, 4, 5, '...', totalPages);
-    } else if (safeCurrentPage >= totalPages - 3) {
-      pages.push(1, '...', totalPages - 4, totalPages - 3, totalPages - 2, totalPages - 1, totalPages);
-    } else {
-      pages.push(1, '...', safeCurrentPage - 1, safeCurrentPage, safeCurrentPage + 1, '...', totalPages);
-    }
-    return pages;
-  }, [totalPages, safeCurrentPage]);
-
-  const completedCount = useMemo(() => projects.filter(p => p.status === 'completed' || p.status === 'approved').length, [projects]);
-  const inProgressCount = useMemo(() => projects.filter(p => p.status === 'in_progress' || p.status === 'assigned').length, [projects]);
-  const pendingProjectsCount = useMemo(() => projects.filter(p => p.status === 'pending' || !p.status || p.status === 'submitted').length, [projects]);
-
   return (
-    <div className="w-full space-y-6 sm:space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
-      {/* Metric Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="bg-white dark:bg-[#1E1E1E] border border-gray-200 dark:border-[#333333] p-4 sm:p-5 rounded-xl flex items-center justify-between shadow-sm">
-          <div>
-            <p className="text-xs sm:text-sm font-medium text-gray-500 dark:text-gray-400">Total Projects</p>
-            <p className="text-2xl sm:text-3xl font-bold text-gray-900 dark:text-white mt-1">{projects.length}</p>
-          </div>
-          <div className="w-10 h-10 rounded-lg bg-amber-50 dark:bg-[#2A2A2A] flex items-center justify-center text-amber-600 dark:text-[#D4AF37]">
-            <FolderOpen className="w-5 h-5" />
-          </div>
-        </div>
-        <div className="bg-white dark:bg-[#1E1E1E] border border-gray-200 dark:border-[#333333] p-4 sm:p-5 rounded-xl flex items-center justify-between shadow-sm">
-          <div>
-            <p className="text-xs sm:text-sm font-medium text-gray-500 dark:text-gray-400">In Progress</p>
-            <p className="text-2xl sm:text-3xl font-bold text-sky-600 dark:text-sky-400 mt-1">{inProgressCount}</p>
-          </div>
-          <div className="w-10 h-10 rounded-lg bg-sky-500/10 flex items-center justify-center text-sky-600 dark:text-sky-400">
-            <Clock3 className="w-5 h-5" />
-          </div>
-        </div>
-        <div className="bg-white dark:bg-[#1E1E1E] border border-gray-200 dark:border-[#333333] p-4 sm:p-5 rounded-xl flex items-center justify-between shadow-sm">
-          <div>
-            <p className="text-xs sm:text-sm font-medium text-gray-500 dark:text-gray-400">Pending Review</p>
-            <p className="text-2xl sm:text-3xl font-bold text-amber-600 dark:text-amber-400 mt-1">{pendingProjectsCount}</p>
-          </div>
-          <div className="w-10 h-10 rounded-lg bg-amber-500/10 flex items-center justify-center text-amber-600 dark:text-amber-400">
-            <Clock className="w-5 h-5" />
-          </div>
-        </div>
-        <div className="bg-white dark:bg-[#1E1E1E] border border-gray-200 dark:border-[#333333] p-4 sm:p-5 rounded-xl flex items-center justify-between shadow-sm">
-          <div>
-            <p className="text-xs sm:text-sm font-medium text-gray-500 dark:text-gray-400">Completed</p>
-            <p className="text-2xl sm:text-3xl font-bold text-emerald-600 dark:text-emerald-400 mt-1">{completedCount}</p>
-          </div>
-          <div className="w-10 h-10 rounded-lg bg-emerald-500/10 flex items-center justify-center text-emerald-600 dark:text-emerald-400">
-            <CheckCircle2 className="w-5 h-5" />
-          </div>
-        </div>
-      </div>
-
-      <div className="w-full bg-white dark:bg-[#1E1E1E] p-4 sm:p-6 md:p-8 rounded-xl border border-gray-200 dark:border-[#333333] shadow-sm">
-        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 gap-4">
-          <div>
-            <h2 className="text-xl sm:text-2xl font-bold font-sans text-gray-900 dark:text-white">My Projects</h2>
-            <p className="text-gray-600 dark:text-gray-400 text-sm sm:text-base mt-1">Track the status of all your submitted projects.</p>
-          </div>
-        </div>
-
-        {/* Search & Filter Bar */}
-        {projects.length > 0 && (
-          <div className="mb-6 space-y-3">
-            <div className="flex flex-col md:flex-row justify-between items-stretch md:items-center gap-3">
-              <div className="relative max-w-md w-full">
-                <input
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => handleSearchChange(e.target.value)}
-                  placeholder="Search by Client, Project No., or Project Name..."
-                  className="w-full pl-10 pr-9 py-2 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] focus:border-transparent outline-none text-sm sm:text-base transition-all shadow-sm"
-                />
-                <div className="absolute left-3 top-2.5 text-gray-400">
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4.5 w-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                  </svg>
-                </div>
-                {searchQuery && (
-                  <button
-                    onClick={() => handleSearchChange("")}
-                    className="absolute right-3 top-2.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 cursor-pointer"
-                    title="Clear search"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
-                )}
-              </div>
-
-              <div className="flex items-center gap-2 self-start md:self-auto">
-                <button
-                  onClick={() => setShowColumnFilters(prev => !prev)}
-                  className={`px-3 py-2 rounded-lg text-xs sm:text-sm font-medium border flex items-center gap-2 transition-colors cursor-pointer ${
-                    showColumnFilters || activeFiltersCount > 0
-                      ? "bg-amber-500/10 border-amber-500/40 text-amber-700 dark:text-[#D4AF37]"
-                      : "bg-white dark:bg-[#1E1E1E] border-gray-300 dark:border-[#2A2A2A] text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-[#2A2A2A]"
-                  }`}
-                  title="Toggle column-header filters"
-                >
-                  <Filter className="w-4 h-4" />
-                  <span>Column Filters</span>
-                  {activeFiltersCount > 0 && (
-                    <span className="w-5 h-5 rounded-full bg-[#D4AF37] text-black font-bold text-[10px] flex items-center justify-center">
-                      {activeFiltersCount}
+    <div className="w-full bg-white dark:bg-[#1E1E1E] p-5 sm:p-8 rounded-2xl border border-gray-200 dark:border-[#333333] shadow-sm">
+      <h2 className="text-xl sm:text-2xl font-bold font-sans text-gray-900 dark:text-white mb-4">My Submitted Projects</h2>
+      {loading ? (
+        <div className="py-12 flex justify-center"><Loader2 className="w-8 h-8 animate-spin text-[#D4AF37]" /></div>
+      ) : projects.length === 0 ? (
+        <div className="text-center py-12 text-gray-500">No projects submitted yet.</div>
+      ) : (
+        <div className="w-full overflow-x-auto rounded-xl border border-gray-200 dark:border-[#333333]">
+          <table className="w-full text-left text-sm whitespace-nowrap">
+            <thead className="bg-gray-50 dark:bg-[#252525] border-b border-gray-200 dark:border-[#333333] text-xs uppercase font-semibold text-gray-600 dark:text-gray-400">
+              <tr>
+                <th className="py-3 px-4">SR. No</th>
+                <th className="py-3 px-4">Date</th>
+                <th className="py-3 px-4">Client Name</th>
+                <th className="py-3 px-4">Project Name</th>
+                <th className="py-3 px-4">Scope</th>
+                <th className="py-3 px-4">Capacity</th>
+                <th className="py-3 px-4">Status</th>
+                <th className="py-3 px-4 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100 dark:divide-[#2A2A2A]">
+              {projects.map((p) => (
+                <tr key={p.id} className="hover:bg-gray-50 dark:hover:bg-[#252525] transition-colors">
+                  <td className="py-3 px-4 font-mono font-medium">{p.projectNumber || p.srNumber || '-'}</td>
+                  <td className="py-3 px-4 text-gray-500">{getProjectDisplayDate(p)}</td>
+                  <td className="py-3 px-4 font-semibold text-gray-900 dark:text-white">{p.clientName}</td>
+                  <td className="py-3 px-4">{p.projectName}</td>
+                  <td className="py-3 px-4">{p.scopeOfWork}</td>
+                  <td className="py-3 px-4">{p.plantCapacity ? `${p.plantCapacity} ${p.capacityUnit || 'KW'}` : '-'}</td>
+                  <td className="py-3 px-4">
+                    <span className={`px-2 py-0.5 rounded text-xs font-semibold border ${getStatusColor(p.status)}`}>
+                      {toTitleCase((p.status || 'ASSIGNED').replace(/_/g, ' '))}
                     </span>
-                  )}
-                </button>
-
-                {(activeFiltersCount > 0 || searchQuery.trim() !== '') && (
-                  <button
-                    onClick={clearAllFilters}
-                    className="px-3 py-2 rounded-lg text-xs sm:text-sm font-medium border border-rose-300 dark:border-rose-900/50 bg-rose-50 dark:bg-rose-950/20 text-rose-600 dark:text-rose-400 hover:bg-rose-100 dark:hover:bg-rose-900/30 flex items-center gap-1.5 transition-colors cursor-pointer"
-                    title="Reset all filters, search query, and sorting"
-                  >
-                    <RotateCcw className="w-3.5 h-3.5" />
-                    <span>Reset Filters</span>
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {/* Active filter badges */}
-            {activeFiltersCount > 0 && (
-              <div className="flex flex-wrap items-center gap-1.5 pt-1 text-xs">
-                <span className="text-gray-500 dark:text-gray-400 font-medium mr-1">Active filters:</span>
-                {filterSrNo && (
-                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950/50 text-amber-800 dark:text-amber-300 border border-amber-300 dark:border-amber-800/50">
-                    No: {filterSrNo}
-                    <button onClick={() => handleFilterSrNoChange("")} className="hover:text-amber-950 dark:hover:text-white cursor-pointer"><X className="w-3 h-3" /></button>
-                  </span>
-                )}
-                {filterDate && (
-                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950/50 text-amber-800 dark:text-amber-300 border border-amber-300 dark:border-amber-800/50">
-                    Date: {filterDate}
-                    <button onClick={() => handleFilterDateChange("")} className="hover:text-amber-950 dark:hover:text-white cursor-pointer"><X className="w-3 h-3" /></button>
-                  </span>
-                )}
-                {filterClient && (
-                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950/50 text-amber-800 dark:text-amber-300 border border-amber-300 dark:border-amber-800/50">
-                    Client: {filterClient}
-                    <button onClick={() => handleFilterClientChange("")} className="hover:text-amber-950 dark:hover:text-white cursor-pointer"><X className="w-3 h-3" /></button>
-                  </span>
-                )}
-                {filterProjectName && (
-                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950/50 text-amber-800 dark:text-amber-300 border border-amber-300 dark:border-amber-800/50">
-                    Project: {filterProjectName}
-                    <button onClick={() => handleFilterProjectNameChange("")} className="hover:text-amber-950 dark:hover:text-white cursor-pointer"><X className="w-3 h-3" /></button>
-                  </span>
-                )}
-                {filterScope && (
-                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950/50 text-amber-800 dark:text-amber-300 border border-amber-300 dark:border-amber-800/50">
-                    Scope: {filterScope}
-                    <button onClick={() => handleFilterScopeChange("")} className="hover:text-amber-950 dark:hover:text-white cursor-pointer"><X className="w-3 h-3" /></button>
-                  </span>
-                )}
-                {filterCapacity && (
-                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950/50 text-amber-800 dark:text-amber-300 border border-amber-300 dark:border-amber-800/50">
-                    Cap: {filterCapacity}
-                    <button onClick={() => handleFilterCapacityChange("")} className="hover:text-amber-950 dark:hover:text-white cursor-pointer"><X className="w-3 h-3" /></button>
-                  </span>
-                )}
-                {filterDesigner && (
-                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950/50 text-amber-800 dark:text-amber-300 border border-amber-300 dark:border-amber-800/50">
-                    Designer: {filterDesigner}
-                    <button onClick={() => handleFilterDesignerChange("")} className="hover:text-amber-950 dark:hover:text-white cursor-pointer"><X className="w-3 h-3" /></button>
-                  </span>
-                )}
-                {filterStatus && (
-                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950/50 text-amber-800 dark:text-amber-300 border border-amber-300 dark:border-amber-800/50">
-                    Status: {toTitleCase(filterStatus.replace(/_/g, ' '))}
-                    <button onClick={() => handleFilterStatusChange("")} className="hover:text-amber-950 dark:hover:text-white cursor-pointer"><X className="w-3 h-3" /></button>
-                  </span>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-
-        {loading ? (
-          <div className="py-12 flex justify-center"><Loader2 className="w-8 h-8 animate-spin text-amber-600 dark:text-[#D4AF37]" /></div>
-        ) : projects.length === 0 ? (
-          <div className="text-center py-12 text-gray-500 dark:text-gray-400 border-2 border-dashed border-gray-300 dark:border-[#333333] rounded-xl">
-            <FolderOpen className="w-12 h-12 mx-auto text-gray-400 dark:text-[#333333] mb-3" />
-            <p>No projects submitted yet.</p>
-          </div>
-        ) : filteredProjects.length === 0 ? (
-          <div className="text-center py-12 text-gray-500 dark:text-gray-400 border border-dashed border-gray-300 dark:border-[#333333] rounded-xl">
-            <FolderOpen className="w-12 h-12 mx-auto text-gray-400 dark:text-[#333333] mb-3" />
-            <p>No projects found matching the specified filters or search &quot;{searchQuery}&quot;</p>
-            <button
-              onClick={clearAllFilters}
-              className="mt-3 px-3 py-1.5 text-xs font-semibold text-amber-700 dark:text-[#D4AF37] hover:underline"
-            >
-              Clear All Filters
-            </button>
-          </div>
-        ) : (
-          <div className="space-y-4">
-            <div className="w-full overflow-x-auto rounded-lg border border-gray-200 dark:border-[#333333] bg-white dark:bg-[#1E1E1E]">
-              <table className="w-full text-left border-collapse whitespace-nowrap min-w-[760px]">
-                <thead className="bg-gray-50 dark:bg-[#252525] border-b border-gray-200 dark:border-[#333333]">
-                  {/* Column Header Titles with Sorting */}
-                  <tr className="text-gray-600 dark:text-gray-400 text-xs sm:text-sm uppercase font-semibold">
-                    <th className="py-3 px-4">
-                      <button
-                        onClick={() => handleSort('projectNumber')}
-                        className="flex items-center gap-1.5 hover:text-amber-600 dark:hover:text-[#D4AF37] transition-colors focus:outline-none group cursor-pointer"
-                        title="Sort by SR / Project Number"
-                      >
-                        <span>SR. No</span>
-                        <span className={sortField === 'projectNumber' ? 'text-amber-600 dark:text-[#D4AF37]' : 'text-gray-400 opacity-40 group-hover:opacity-100'}>
-                          {sortField === 'projectNumber' ? (sortDirection === 'desc' ? <ArrowDown className="w-3.5 h-3.5" /> : <ArrowUp className="w-3.5 h-3.5" />) : <ArrowUpDown className="w-3.5 h-3.5" />}
-                        </span>
-                      </button>
-                    </th>
-                    <th className="py-3 px-4">
-                      <button
-                        onClick={() => handleSort('date')}
-                        className="flex items-center gap-1.5 hover:text-amber-600 dark:hover:text-[#D4AF37] transition-colors focus:outline-none group cursor-pointer"
-                        title="Sort by Date (Default Newest First)"
-                      >
-                        <span>Date</span>
-                        <span className={sortField === 'date' ? 'text-amber-600 dark:text-[#D4AF37]' : 'text-gray-400 opacity-40 group-hover:opacity-100'}>
-                          {sortField === 'date' ? (sortDirection === 'desc' ? <ArrowDown className="w-3.5 h-3.5" /> : <ArrowUp className="w-3.5 h-3.5" />) : <ArrowUpDown className="w-3.5 h-3.5" />}
-                        </span>
-                      </button>
-                    </th>
-                    <th className="py-3 px-4">
-                      <button
-                        onClick={() => handleSort('clientName')}
-                        className="flex items-center gap-1.5 hover:text-amber-600 dark:hover:text-[#D4AF37] transition-colors focus:outline-none group cursor-pointer"
-                        title="Sort by Client Name"
-                      >
-                        <span>Client Name</span>
-                        <span className={sortField === 'clientName' ? 'text-amber-600 dark:text-[#D4AF37]' : 'text-gray-400 opacity-40 group-hover:opacity-100'}>
-                          {sortField === 'clientName' ? (sortDirection === 'desc' ? <ArrowDown className="w-3.5 h-3.5" /> : <ArrowUp className="w-3.5 h-3.5" />) : <ArrowUpDown className="w-3.5 h-3.5" />}
-                        </span>
-                      </button>
-                    </th>
-                    <th className="py-3 px-4">
-                      <button
-                        onClick={() => handleSort('projectName')}
-                        className="flex items-center gap-1.5 hover:text-amber-600 dark:hover:text-[#D4AF37] transition-colors focus:outline-none group cursor-pointer"
-                        title="Sort by Project Name"
-                      >
-                        <span>Project Name</span>
-                        <span className={sortField === 'projectName' ? 'text-amber-600 dark:text-[#D4AF37]' : 'text-gray-400 opacity-40 group-hover:opacity-100'}>
-                          {sortField === 'projectName' ? (sortDirection === 'desc' ? <ArrowDown className="w-3.5 h-3.5" /> : <ArrowUp className="w-3.5 h-3.5" />) : <ArrowUpDown className="w-3.5 h-3.5" />}
-                        </span>
-                      </button>
-                    </th>
-                    <th className="py-3 px-4">
-                      <button
-                        onClick={() => handleSort('scopeOfWork')}
-                        className="flex items-center gap-1.5 hover:text-amber-600 dark:hover:text-[#D4AF37] transition-colors focus:outline-none group cursor-pointer"
-                        title="Sort by Scope of Work"
-                      >
-                        <span>Scope</span>
-                        <span className={sortField === 'scopeOfWork' ? 'text-amber-600 dark:text-[#D4AF37]' : 'text-gray-400 opacity-40 group-hover:opacity-100'}>
-                          {sortField === 'scopeOfWork' ? (sortDirection === 'desc' ? <ArrowDown className="w-3.5 h-3.5" /> : <ArrowUp className="w-3.5 h-3.5" />) : <ArrowUpDown className="w-3.5 h-3.5" />}
-                        </span>
-                      </button>
-                    </th>
-                    <th className="py-3 px-4">
-                      <button
-                        onClick={() => handleSort('plantCapacity')}
-                        className="flex items-center gap-1.5 hover:text-amber-600 dark:hover:text-[#D4AF37] transition-colors focus:outline-none group cursor-pointer"
-                        title="Sort by Plant Capacity"
-                      >
-                        <span>Capacity</span>
-                        <span className={sortField === 'plantCapacity' ? 'text-amber-600 dark:text-[#D4AF37]' : 'text-gray-400 opacity-40 group-hover:opacity-100'}>
-                          {sortField === 'plantCapacity' ? (sortDirection === 'desc' ? <ArrowDown className="w-3.5 h-3.5" /> : <ArrowUp className="w-3.5 h-3.5" />) : <ArrowUpDown className="w-3.5 h-3.5" />}
-                        </span>
-                      </button>
-                    </th>
-                    <th className="py-3 px-4">
-                      <button
-                        onClick={() => handleSort('designer')}
-                        className="flex items-center gap-1.5 hover:text-amber-600 dark:hover:text-[#D4AF37] transition-colors focus:outline-none group cursor-pointer"
-                        title="Sort by Assigned Designer"
-                      >
-                        <span>Designer</span>
-                        <span className={sortField === 'designer' ? 'text-amber-600 dark:text-[#D4AF37]' : 'text-gray-400 opacity-40 group-hover:opacity-100'}>
-                          {sortField === 'designer' ? (sortDirection === 'desc' ? <ArrowDown className="w-3.5 h-3.5" /> : <ArrowUp className="w-3.5 h-3.5" />) : <ArrowUpDown className="w-3.5 h-3.5" />}
-                        </span>
-                      </button>
-                    </th>
-                    <th className="py-3 px-4">
-                      <button
-                        onClick={() => handleSort('status')}
-                        className="flex items-center gap-1.5 hover:text-amber-600 dark:hover:text-[#D4AF37] transition-colors focus:outline-none group cursor-pointer"
-                        title="Sort by Status"
-                      >
-                        <span>Status</span>
-                        <span className={sortField === 'status' ? 'text-amber-600 dark:text-[#D4AF37]' : 'text-gray-400 opacity-40 group-hover:opacity-100'}>
-                          {sortField === 'status' ? (sortDirection === 'desc' ? <ArrowDown className="w-3.5 h-3.5" /> : <ArrowUp className="w-3.5 h-3.5" />) : <ArrowUpDown className="w-3.5 h-3.5" />}
-                        </span>
-                      </button>
-                    </th>
-                    <th className="py-3 px-4 text-right">Actions</th>
-                  </tr>
-
-                  {/* Column Filters Row */}
-                  {showColumnFilters && (
-                    <tr className="bg-gray-100/80 dark:bg-[#202020] border-t border-b border-gray-200 dark:border-[#333333]">
-                      <th className="p-2">
-                        <input
-                          type="text"
-                          value={filterSrNo}
-                          onChange={(e) => handleFilterSrNoChange(e.target.value)}
-                          placeholder="Filter No..."
-                          className="w-full text-xs px-2 py-1 rounded border border-gray-300 dark:border-[#333333] bg-white dark:bg-[#1E1E1E] text-gray-900 dark:text-white font-normal focus:outline-none focus:ring-1 focus:ring-[#D4AF37]"
-                        />
-                      </th>
-                      <th className="p-2">
-                        <input
-                          type="text"
-                          value={filterDate}
-                          onChange={(e) => handleFilterDateChange(e.target.value)}
-                          placeholder="Filter Date..."
-                          className="w-full text-xs px-2 py-1 rounded border border-gray-300 dark:border-[#333333] bg-white dark:bg-[#1E1E1E] text-gray-900 dark:text-white font-normal focus:outline-none focus:ring-1 focus:ring-[#D4AF37]"
-                        />
-                      </th>
-                      <th className="p-2">
-                        <select
-                          value={filterClient}
-                          onChange={(e) => handleFilterClientChange(e.target.value)}
-                          className="w-full text-xs px-2 py-1 rounded border border-gray-300 dark:border-[#333333] bg-white dark:bg-[#1E1E1E] text-gray-900 dark:text-white font-normal focus:outline-none focus:ring-1 focus:ring-[#D4AF37] max-w-[140px]"
-                        >
-                          <option value="">All Clients</option>
-                          {uniqueClients.map(c => (
-                            <option key={c} value={c}>{toTitleCase(c)}</option>
-                          ))}
-                        </select>
-                      </th>
-                      <th className="p-2">
-                        <input
-                          type="text"
-                          value={filterProjectName}
-                          onChange={(e) => handleFilterProjectNameChange(e.target.value)}
-                          placeholder="Filter Name..."
-                          className="w-full text-xs px-2 py-1 rounded border border-gray-300 dark:border-[#333333] bg-white dark:bg-[#1E1E1E] text-gray-900 dark:text-white font-normal focus:outline-none focus:ring-1 focus:ring-[#D4AF37]"
-                        />
-                      </th>
-                      <th className="p-2">
-                        <select
-                          value={filterScope}
-                          onChange={(e) => handleFilterScopeChange(e.target.value)}
-                          className="w-full text-xs px-2 py-1 rounded border border-gray-300 dark:border-[#333333] bg-white dark:bg-[#1E1E1E] text-gray-900 dark:text-white font-normal focus:outline-none focus:ring-1 focus:ring-[#D4AF37] max-w-[140px]"
-                        >
-                          <option value="">All Scopes</option>
-                          {uniqueScopes.map(s => (
-                            <option key={s} value={s}>{toTitleCase(s)}</option>
-                          ))}
-                        </select>
-                      </th>
-                      <th className="p-2">
-                        <input
-                          type="text"
-                          value={filterCapacity}
-                          onChange={(e) => handleFilterCapacityChange(e.target.value)}
-                          placeholder="Filter KW..."
-                          className="w-full text-xs px-2 py-1 rounded border border-gray-300 dark:border-[#333333] bg-white dark:bg-[#1E1E1E] text-gray-900 dark:text-white font-normal focus:outline-none focus:ring-1 focus:ring-[#D4AF37] max-w-[85px]"
-                        />
-                      </th>
-                      <th className="p-2">
-                        <select
-                          value={filterDesigner}
-                          onChange={(e) => handleFilterDesignerChange(e.target.value)}
-                          className="w-full text-xs px-2 py-1 rounded border border-gray-300 dark:border-[#333333] bg-white dark:bg-[#1E1E1E] text-gray-900 dark:text-white font-normal focus:outline-none focus:ring-1 focus:ring-[#D4AF37] max-w-[140px]"
-                        >
-                          <option value="">All Designers</option>
-                          <option value="unassigned">Unassigned</option>
-                          {designers.map(d => (
-                            <option key={d.id} value={d.email}>{toTitleCase(d.name)}</option>
-                          ))}
-                        </select>
-                      </th>
-                      <th className="p-2">
-                        <select
-                          value={filterStatus}
-                          onChange={(e) => handleFilterStatusChange(e.target.value)}
-                          className="w-full text-xs px-2 py-1 rounded border border-gray-300 dark:border-[#333333] bg-white dark:bg-[#1E1E1E] text-gray-900 dark:text-white font-normal focus:outline-none focus:ring-1 focus:ring-[#D4AF37] max-w-[125px]"
-                        >
-                          <option value="">All Statuses</option>
-                          {uniqueStatuses.map(st => (
-                            <option key={st} value={st}>{toTitleCase(st.replace(/_/g, ' '))}</option>
-                          ))}
-                        </select>
-                      </th>
-                      <th className="p-2 text-right">
-                        {activeFiltersCount > 0 && (
-                          <button
-                            onClick={clearAllFilters}
-                            className="text-xs text-amber-600 dark:text-[#D4AF37] hover:underline font-semibold cursor-pointer"
-                          >
-                            Reset
-                          </button>
-                        )}
-                      </th>
-                    </tr>
-                  )}
-                </thead>
-                <tbody className="text-sm sm:text-base divide-y divide-gray-100 dark:divide-[#2A2A2A]">
-                  {paginatedProjects.map(p => (
-                    <tr key={p.id} className="transition-colors hover:bg-gray-50 dark:hover:bg-[#2A2A2A]">
-                      <td className="py-3 px-4 font-medium text-gray-800 dark:text-gray-200">{p.projectNumber || p.srNumber || '-'}</td>
-                      <td className="py-3 px-4 text-gray-600 dark:text-gray-300 whitespace-nowrap text-xs sm:text-sm font-medium">
-                        {getProjectDisplayDate(p)}
-                      </td>
-                      <td className="py-3 px-4 text-gray-800 dark:text-gray-200 font-medium">
-                        {toTitleCase(p.clientName)}
-                      </td>
-                      <td className="py-3 px-4 text-gray-800 dark:text-gray-200 font-medium">
-                        {toTitleCase(p[PROJECT_FIELDS.PROJECT_NAME] || '-')}
-                      </td>
-                      <td className="py-3 px-4 text-gray-700 dark:text-gray-200">
-                        {toTitleCase(p.scopeOfWork)}
-                        {p.subService && <span className="block text-xs sm:text-sm text-gray-500 dark:text-gray-400">{toTitleCase(p.subService)}</span>}
-                      </td>
-                      <td className="py-3 px-4 text-gray-700 dark:text-gray-200">
-                        {p.plantCapacity ? `${p.plantCapacity} ${p.capacityUnit || 'KW'}` : <span className="text-gray-400 italic">TBD</span>}
-                      </td>
-                      <td className="py-3 px-4">
-                        {p.assignedScopes && Object.keys(p.assignedScopes).length > 1 ? (
-                          <div className="flex flex-col gap-1.5 py-1 min-w-[220px]">
-                            <div className="flex items-center gap-1.5 text-[11px] font-bold text-amber-600 dark:text-[#D4AF37] uppercase tracking-wider">
-                              <Layers className="w-3.5 h-3.5" />
-                              <span>Split Scope ({Object.keys(p.assignedScopes).length})</span>
-                            </div>
-                            <div className="space-y-1">
-                              {Object.entries(p.assignedScopes).map(([sKey, dEmail]) => {
-                                const dEmailStr = String(dEmail || "");
-                                const designerObj = designers.find(d => d.email === dEmailStr);
-                                return (
-                                  <div key={sKey} className="flex items-center justify-between gap-1.5 bg-gray-50 dark:bg-[#252525] px-2 py-1 rounded border border-gray-200 dark:border-[#333333] text-xs">
-                                    <span className="font-semibold text-gray-700 dark:text-gray-300 font-mono text-[11px] truncate max-w-[75px]" title={sKey}>
-                                      {sKey}:
-                                    </span>
-                                    <select
-                                      value={dEmailStr}
-                                      onChange={(e) => handleReassignScopeDesigner(p.id, sKey, e.target.value)}
-                                      className="bg-transparent text-gray-900 dark:text-gray-100 text-xs font-medium focus:outline-none cursor-pointer max-w-[135px] truncate"
-                                      title={`Assigned: ${designerObj ? designerObj.name : dEmailStr}`}
-                                    >
-                                      <option value="" className="bg-white dark:bg-[#1E1E1E]">Unassigned</option>
-                                      {designers.map(d => (
-                                        <option key={d.id} value={d.email} className="bg-white dark:bg-[#1E1E1E]">
-                                          {d.name}
-                                        </option>
-                                      ))}
-                                    </select>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          </div>
-                        ) : (
-                          <select
-                            value={p.designerEmail || (p.assignedScopes ? Object.values(p.assignedScopes)[0] : "") || ""}
-                            onChange={(e) => handleReassignDesigner(p.id, e.target.value)}
-                            className="bg-white dark:bg-[#1E1E1E] border border-gray-300 dark:border-[#2A2A2A] rounded-lg px-2.5 py-1 text-xs sm:text-sm font-semibold text-gray-800 dark:text-gray-200 focus:outline-none focus:ring-1 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] cursor-pointer max-w-[200px] hover:border-[#D4AF37]/50 transition-colors"
-                          >
-                            <option value="" className="bg-white dark:bg-[#1E1E1E] text-gray-900 dark:text-white">Unassigned</option>
-                            {designers.map(d => (
-                              <option key={d.id} value={d.email} className="bg-white dark:bg-[#1E1E1E] text-gray-900 dark:text-white">
-                                {toTitleCase(d.name)}
-                              </option>
-                            ))}
-                          </select>
-                        )}
-                      </td>
-                      <td className="py-3 px-4">
-                        <span className={`inline-block px-2 py-1 rounded text-xs font-medium border text-center ${getStatusColor(p.status)}`}>
-                          {toTitleCase(p.status.replace(/_/g, ' '))}
-                        </span>
-                      </td>
-                      <td className="py-2 px-4 text-right">
-                        <div className="flex flex-row justify-end items-center gap-2">
-                          <button
-                            onClick={() => setProjectToUpgrade(p)}
-                            className="px-2.5 py-1 bg-[#D4AF37] hover:bg-[#c59f2e] active:scale-[0.98] text-black text-xs sm:text-sm font-semibold rounded-lg transition-all shadow-sm whitespace-nowrap flex items-center gap-1 cursor-pointer"
-                            title="Upgrade Project Scopes & Assign Designers"
-                          >
-                            <Sparkles className="w-3.5 h-3.5" />
-                            <span>Upgrade Scope</span>
-                          </button>
-                          <button
-                            onClick={() => setSelectedProject(p)}
-                            className="px-2.5 py-1 bg-gray-100 hover:bg-gray-200 dark:bg-[#1E1E1E] dark:hover:bg-[#2A2A2A] text-gray-700 dark:text-gray-200 text-xs sm:text-sm font-semibold rounded-lg border border-gray-300 dark:border-[#2A2A2A] transition-colors shadow-sm whitespace-nowrap cursor-pointer"
-                          >
-                            Request Change
-                          </button>
-                          <button
-                            onClick={() => {
-                              showToast("Transfer Project coming soon!");
-                            }}
-                            className="px-2.5 py-1 bg-gray-100 hover:bg-gray-200 dark:bg-[#1E1E1E] dark:hover:bg-[#2A2A2A] text-gray-700 dark:text-gray-200 text-xs sm:text-sm font-semibold rounded-lg border border-gray-300 dark:border-[#2A2A2A] transition-colors shadow-sm whitespace-nowrap cursor-pointer"
-                          >
-                            Transfer Project
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-
-            {/* Pagination Controls (Strictly 15 per page) */}
-            <div className="flex flex-col sm:flex-row items-center justify-between gap-4 pt-3 border-t border-gray-200 dark:border-[#333333] px-1">
-              <div className="text-xs sm:text-sm text-gray-600 dark:text-gray-300 font-medium">
-                Page <span className="font-semibold text-gray-900 dark:text-white">{safeCurrentPage}</span> of <span className="font-semibold text-gray-900 dark:text-white">{totalPages}</span> • Showing <span className="font-semibold text-gray-900 dark:text-white">{filteredProjects.length === 0 ? "0" : `${(safeCurrentPage - 1) * PAGE_SIZE + 1}-${Math.min(safeCurrentPage * PAGE_SIZE, filteredProjects.length)}`}</span> of <span className="font-semibold text-gray-900 dark:text-white">{filteredProjects.length}</span> projects
-                {projects.length !== filteredProjects.length && (
-                  <span className="ml-1 text-xs text-amber-600 dark:text-[#D4AF37] font-medium">(filtered from {projects.length} total)</span>
-                )}
-              </div>
-
-              <div className="flex items-center gap-1.5 flex-wrap justify-center">
-                <button
-                  onClick={() => setCurrentPage(1)}
-                  disabled={safeCurrentPage === 1}
-                  className="p-1.5 rounded-lg border border-gray-300 dark:border-[#333333] bg-white dark:bg-[#1E1E1E] text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#2A2A2A] disabled:opacity-40 disabled:cursor-not-allowed text-xs transition-colors cursor-pointer"
-                  title="First Page"
-                >
-                  <ChevronsLeft className="w-4 h-4" />
-                </button>
-                <button
-                  onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
-                  disabled={safeCurrentPage === 1}
-                  className="px-3 py-1.5 rounded-lg border border-gray-300 dark:border-[#333333] bg-white dark:bg-[#1E1E1E] text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#2A2A2A] disabled:opacity-40 disabled:cursor-not-allowed text-xs sm:text-sm font-medium flex items-center gap-1 transition-colors cursor-pointer"
-                >
-                  <ChevronLeft className="w-4 h-4" />
-                  <span>Previous</span>
-                </button>
-
-                {/* Direct Page Numbers */}
-                <div className="flex items-center gap-1">
-                  {pageNumbers.map((page, idx) => {
-                    if (page === '...') {
-                      return <span key={`ellipsis-${idx}`} className="px-1 text-xs text-gray-400">...</span>;
-                    }
-                    const isCurrent = page === safeCurrentPage;
-                    return (
-                      <button
-                        key={`page-${page}`}
-                        onClick={() => setCurrentPage(Number(page))}
-                        className={`w-8 h-8 rounded-lg text-xs sm:text-sm font-medium transition-colors cursor-pointer ${
-                          isCurrent
-                            ? "bg-[#D4AF37] text-black font-bold shadow-sm"
-                            : "bg-white dark:bg-[#1E1E1E] border border-gray-300 dark:border-[#333333] text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#2A2A2A]"
-                        }`}
-                      >
-                        {page}
-                      </button>
-                    );
-                  })}
-                </div>
-
-                <button
-                  onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
-                  disabled={safeCurrentPage === totalPages}
-                  className="px-3 py-1.5 rounded-lg border border-gray-300 dark:border-[#333333] bg-white dark:bg-[#1E1E1E] text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#2A2A2A] disabled:opacity-40 disabled:cursor-not-allowed text-xs sm:text-sm font-medium flex items-center gap-1 transition-colors cursor-pointer"
-                >
-                  <span>Next</span>
-                  <ChevronRight className="w-4 h-4" />
-                </button>
-                <button
-                  onClick={() => setCurrentPage(totalPages)}
-                  disabled={safeCurrentPage === totalPages}
-                  className="p-1.5 rounded-lg border border-gray-300 dark:border-[#333333] bg-white dark:bg-[#1E1E1E] text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#2A2A2A] disabled:opacity-40 disabled:cursor-not-allowed text-xs transition-colors cursor-pointer"
-                  title="Last Page"
-                >
-                  <ChevronsRight className="w-4 h-4" />
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Upgrade Project Scope Modal */}
-        {projectToUpgrade && (
-          <UpgradeProjectModal
-            isOpen={Boolean(projectToUpgrade)}
-            project={projectToUpgrade}
-            lockedEmail={lockedEmail}
-            designers={designers}
-            scopesData={scopesData}
-            onClose={() => setProjectToUpgrade(null)}
-            onSuccess={(msg) => {
-              setProjectToUpgrade(null);
-              showToast(msg);
-            }}
-          />
-        )}
-
-        {selectedProject && (
-          <RequestChangeModal
-            project={selectedProject}
-            lockedEmail={lockedEmail}
-            onClose={() => setSelectedProject(null)}
-            onSuccess={(msg) => {
-              setSelectedProject(null);
-              showToast(msg);
-            }}
-          />
-        )}
-
-        {toastMsg && (
-          <div className="fixed bottom-6 right-6 z-50 p-4 bg-emerald-500 text-white rounded-lg shadow-xl flex items-center gap-3 animate-in slide-in-from-bottom duration-300 border border-emerald-600">
-            <CheckCircle2 className="w-5 h-5 shrink-0 text-white" />
-            <span className="font-semibold text-sm sm:text-base">{toastMsg}</span>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-interface RequestChangeModalProps {
-  project: any;
-  lockedEmail: string | null;
-  onClose: () => void;
-  onSuccess: (msg: string) => void;
-}
-
-function RequestChangeModal({ project, lockedEmail, onClose, onSuccess }: RequestChangeModalProps) {
-  const [fieldToChange, setFieldToChange] = useState("");
-  const [requestedValue, setRequestedValue] = useState("");
-  const [reason, setReason] = useState("");
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [errorMsg, setErrorMsg] = useState("");
-
-  const currentValue = useMemo(() => {
-    if (!fieldToChange) return "";
-    if (fieldToChange === "Plant Capacity") {
-      return String(project[PROJECT_FIELDS.PLANT_CAPACITY] || "");
-    } else if (fieldToChange === "Scope of Work") {
-      return String(project[PROJECT_FIELDS.SCOPE_OF_WORK] || "");
-    } else if (fieldToChange === "Sub Service") {
-      return String(project[PROJECT_FIELDS.SUB_SERVICE] || "");
-    } else if (fieldToChange === "Location") {
-      return String(project[PROJECT_FIELDS.LOCATION] || "");
-    } else if (fieldToChange === "Designer") {
-      if (project.assignedScopes && Object.keys(project.assignedScopes).length > 1) {
-        return Object.entries(project.assignedScopes).map(([k, v]) => `${k}: ${v}`).join(', ');
-      }
-      return String(project.designerName || project.designerEmail || "");
-    }
-    return "N/A";
-  }, [fieldToChange, project]);
-
-  const handleSubmit = async () => {
-    if (!fieldToChange || !currentValue || !requestedValue || !reason) {
-      setErrorMsg("All fields marked with * are required.");
-      return;
-    }
-
-    setIsSubmitting(true);
-    setErrorMsg("");
-
-    try {
-      const payload = {
-        projectId: project.id || "",
-        projectNumber: project.projectNumber || project.srNumber || "",
-        clientName: project.clientName || "",
-        fieldToChange,
-        currentValue,
-        requestedValue: fieldToChange === "Designer" ? requestedValue : toTitleCase(requestedValue),
-        reason: toTitleCase(reason),
-        requestedBy: lockedEmail || "",
-        status: "pending",
-        createdAt: serverTimestamp()
-      };
-
-      await addDoc(collection(db, COLLECTIONS.CHANGE_REQUESTS), payload);
-      onSuccess("Change Request sent to Admin");
-    } catch (err: any) {
-      console.error("Error submitting change request: ", err);
-      setErrorMsg(err.message || "Failed to submit change request. Please try again.");
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
-      <div className="w-full max-w-lg bg-white dark:bg-[#1E1E1E] rounded-xl shadow-xl border border-gray-200 dark:border-[#333333] overflow-hidden transform transition-all scale-100 animate-in zoom-in-95 duration-200 max-h-[90vh] flex flex-col">
-        {/* Header */}
-        <div className="px-4 sm:px-6 py-3 sm:py-4 border-b border-gray-200 dark:border-[#333333] flex justify-between items-center bg-gray-50 dark:bg-[#1E1E1E]">
-          <div>
-            <h3 className="text-base sm:text-lg font-bold font-sans text-gray-900 dark:text-white">
-              Request Project Change
-            </h3>
-            <p className="text-xs sm:text-sm text-gray-500 dark:text-gray-400 mt-0.5">
-              {project.projectNumber || project.srNumber || '-'} - {project.clientName}
-            </p>
-          </div>
-          <button
-            onClick={onClose}
-            className="text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white transition-colors p-1.5 rounded-lg hover:bg-gray-100 dark:hover:bg-[#2A2A2A]"
-          >
-            <X className="w-5 h-5" />
-          </button>
+                  </td>
+                  <td className="py-3 px-4 text-right">
+                    <button
+                      onClick={() => setProjectToUpgrade(p)}
+                      className="px-3 py-1 bg-[#D4AF37] text-black font-semibold rounded-lg text-xs hover:bg-[#c59f2e] transition-all cursor-pointer inline-flex items-center gap-1"
+                    >
+                      <Sparkles className="w-3.5 h-3.5" /> Upgrade Scope
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
+      )}
 
-        {/* Form Body */}
-        <div className="p-4 sm:p-6 space-y-4 overflow-y-auto flex-1 bg-white dark:bg-[#1E1E1E]">
-          {errorMsg && (
-            <div className="p-3 bg-rose-500/10 text-rose-600 dark:text-rose-400 rounded-lg flex items-start gap-2 border border-rose-500/30 text-sm sm:text-base">
-              <AlertCircle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
-              <span>{errorMsg}</span>
-            </div>
-          )}
-
-          <div className="space-y-1">
-            <label className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-200">
-              Field to Change *
-            </label>
-            <select
-              value={fieldToChange}
-              onChange={(e) => setFieldToChange(e.target.value)}
-              disabled={isSubmitting}
-              className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] outline-none"
-            >
-              <option value="">Select a field</option>
-              <option value="Scope of Work">Scope of Work</option>
-              <option value="Plant Capacity">Plant Capacity</option>
-              <option value="Location">Location</option>
-              <option value="Sub Service">Sub Service</option>
-              <option value="Designer">Designer</option>
-              <option value="Other">Other</option>
-            </select>
-          </div>
-
-          <div className="space-y-1">
-            <label className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-200">
-              Current Value *
-            </label>
-            <input
-              type="text"
-              value={currentValue}
-              readOnly
-              placeholder="Select a field first"
-              className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-100 dark:bg-[#2A2A2A] text-gray-600 dark:text-gray-400 cursor-not-allowed focus:ring-0 outline-none font-medium"
-            />
-          </div>
-
-          <div className="space-y-1">
-            <label className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-200">
-              Requested Value *
-            </label>
-            <input
-              type="text"
-              value={requestedValue}
-              onChange={(e) => setRequestedValue(e.target.value)}
-              disabled={isSubmitting}
-              placeholder="e.g. 75 KW"
-              className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] outline-none"
-            />
-          </div>
-
-          <div className="space-y-1">
-            <label className="text-sm sm:text-base font-medium text-gray-700 dark:text-gray-200">
-              Reason for Change *
-            </label>
-            <textarea
-              value={reason}
-              onChange={(e) => setReason(e.target.value)}
-              disabled={isSubmitting}
-              rows={3}
-              placeholder="Provide a detailed explanation for this change request..."
-              className="w-full p-2.5 rounded-lg border border-gray-300 dark:border-[#2A2A2A] bg-gray-50 dark:bg-[#1E1E1E] text-gray-900 dark:text-white focus:ring-2 focus-within:border-[#D4AF37] focus:ring-[#D4AF37] outline-none"
-            />
-          </div>
-        </div>
-
-        {/* Footer */}
-        <div className="px-4 sm:px-6 py-3 sm:py-4 bg-gray-50 dark:bg-[#1E1E1E] border-t border-gray-200 dark:border-[#333333] flex flex-col-reverse sm:flex-row justify-end gap-2 sm:gap-3">
-          <button
-            onClick={onClose}
-            disabled={isSubmitting}
-            className="w-full sm:w-auto px-4 py-2 text-sm sm:text-base font-medium text-gray-700 dark:text-gray-200 bg-white dark:bg-[#1E1E1E] border border-gray-300 dark:border-[#2A2A2A] rounded-lg hover:bg-gray-100 dark:hover:bg-[#2A2A2A] transition-colors"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={handleSubmit}
-            disabled={isSubmitting || !fieldToChange || !currentValue || !requestedValue || !reason}
-            className="w-full sm:w-auto px-4 py-2 text-sm sm:text-base font-medium text-black bg-[#D4AF37] rounded-lg hover:opacity-90 transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
-          >
-            {isSubmitting && <Loader2 className="w-4 h-4 animate-spin" />}
-            Submit Request
-          </button>
-        </div>
-      </div>
+      {projectToUpgrade && (
+        <UpgradeProjectModal
+          isOpen={Boolean(projectToUpgrade)}
+          project={projectToUpgrade}
+          lockedEmail={lockedEmail}
+          designers={designers}
+          scopesData={scopesData}
+          onClose={() => setProjectToUpgrade(null)}
+          onSuccess={() => setProjectToUpgrade(null)}
+        />
+      )}
     </div>
   );
 }
